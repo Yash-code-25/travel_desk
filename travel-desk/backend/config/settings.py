@@ -94,6 +94,7 @@ AUTHENTICATION_BACKENDS = ['desk.security.LockoutModelBackend']
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # serves the React build + admin static files
     'desk.middleware.SecurityHeadersMiddleware',
     'django.middleware.gzip.GZipMiddleware',  # smaller JSON responses
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -205,6 +206,18 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # `python manage.py collectstatic` copies Django admin files here
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
+
+# The built React app (`npm run build` in frontend/) is served from the site root:
+# https://yoursite/ -> index.html, /assets/... -> JS/CSS. Only used once it has been built.
+FRONTEND_BUILD = BASE_DIR / 'frontend_build'
+if FRONTEND_BUILD.exists():
+    WHITENOISE_ROOT = FRONTEND_BUILD
+    WHITENOISE_INDEX_FILE = True
 
 # ------------------------------------------------------------------ email
 # Without DJANGO_EMAIL_HOST, emails are printed in the Django terminal (development).

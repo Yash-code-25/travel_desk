@@ -6,7 +6,10 @@ export default defineConfig({
   server: {
     port: 5174,
     strictPort: true,
-    // Forward /api to Django so cookies (login session + CSRF) just work.
     proxy: { '/api': 'http://127.0.0.1:8001' },
+  },
+  build: {
+    outDir: '../backend/frontend_build',  // Django serves the site from here
+    emptyOutDir: true,
   },
 })
