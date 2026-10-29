@@ -169,9 +169,11 @@ class EmployeeAdminTests(TestCase):
     def _trip(self, username, days=5):
         c = APIClient()
         c.force_authenticate(User.objects.get(username=username))
-        res = c.post('/api/requests/', dict(service='FLIGHT', origin='Pune', destination=f'Delhi{days}',
-                                            start_date=(timezone.localdate() + timedelta(days=days)).isoformat(),
-                                            purpose='Client meeting with Acme'), format='json')
+        date = (timezone.localdate() + timedelta(days=days)).isoformat()
+        res = c.post('/api/requests/', dict(
+            traveller_is_requester=True, purpose='Client meeting with Acme',
+            legs=[dict(service='FLIGHT', origin='Pune', destination=f'Delhi{days}', date=date)],
+        ), format='json')
         self.assertEqual(res.status_code, 201, res.data)
         return TravelRequest.objects.get(pk=res.data['id'])
 

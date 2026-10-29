@@ -65,7 +65,10 @@ class TravelRequest(models.Model):
         Status.IN_PROGRESS, Status.BOOKED, Status.CANCELLATION_REQUESTED,
     ]
 
+    MAX_LEGS = 10
+
     request_code = models.CharField(max_length=20, unique=True, blank=True)
+    # The employee who RAISED the request (the traveller may be someone else, see below).
     employee = models.ForeignKey(User, on_delete=models.PROTECT, related_name='travel_requests')
     approver = models.ForeignKey(
         User, null=True, on_delete=models.PROTECT, related_name='requests_to_approve'
@@ -74,23 +77,22 @@ class TravelRequest(models.Model):
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name='desk_assignments'
     )
 
-    service = models.CharField(max_length=10, choices=Service.choices)
-    origin = models.CharField(max_length=100, blank=True)  # not used for hotels
-    destination = models.CharField(max_length=100)
-    start_date = models.DateField()  # departure / check-in
-    end_date = models.DateField(null=True, blank=True)  # return / check-out
+    # Who actually travels. Can be the requester, a colleague or a guest.
+    traveller_is_requester = models.BooleanField(default=True)
+    traveller_name = models.CharField(max_length=150)
+    traveller_phone = models.CharField(max_length=20, blank=True)
+    traveller_email = models.EmailField(blank=True)
+
+    # First and last day of the whole itinerary, kept in sync with the legs (see sync_dates).
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
     purpose = models.TextField()
     preferences = models.TextField(blank=True)
-    estimated_cost = models.DecimalField(
+    estimated_cost = models.DecimalField(  # for the whole trip
         max_digits=10, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)]
     )
 
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.PENDING_APPROVAL)
-
-    # Filled in by the Travel Desk
-    booking_reference = models.CharField(max_length=50, blank=True)
-    actual_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    ticket = models.FileField(upload_to='tickets/', blank=True)
 
     submitted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -111,9 +113,41 @@ class TravelRequest(models.Model):
             self.request_code = f'TR-{self.created_at.year}-{self.pk:05d}'
             super().save(update_fields=['request_code'])
 
+    def sync_dates(self):
+        """start_date / end_date = first day and last day across all legs."""
+        legs = list(self.legs.all())
+        if legs:
+            self.start_date = min(leg.date for leg in legs)
+            last = max(leg.end_date or leg.date for leg in legs)
+            self.end_date = last if last != self.start_date else None
+
     @property
     def last_date(self):
         return self.end_date or self.start_date
+
+    @property
+    def route_summary(self):
+        """e.g. "Pune → Mumbai → Delhi · Hotel in Delhi" (uses prefetched legs)."""
+        stops, hotels = [], []
+        for leg in self.legs.all():
+            if leg.service == self.Service.HOTEL:
+                hotels.append(leg.destination)
+                continue
+            if not stops or stops[-1].lower() != leg.origin.lower():
+                stops.append(leg.origin)
+            stops.append(leg.destination)
+        parts = [' → '.join(stops)] if stops else []
+        parts += [f'Hotel in {city}' for city in hotels]
+        return ' · '.join(parts)
+
+    @property
+    def services(self):
+        return list(dict.fromkeys(leg.service for leg in self.legs.all()))
+
+    @property
+    def total_actual_cost(self):
+        costs = [leg.actual_cost for leg in self.legs.all() if leg.actual_cost is not None]
+        return sum(costs) if costs else None
 
     @property
     def is_overdue(self):
@@ -123,6 +157,38 @@ class TravelRequest(models.Model):
 
     def __str__(self):
         return self.request_code or f'Request {self.pk}'
+
+
+class TripLeg(models.Model):
+    """One booking inside a trip: a flight, train, cab or hotel stay. A trip has 1-10 legs in date order."""
+
+    request = models.ForeignKey(TravelRequest, on_delete=models.CASCADE, related_name='legs')
+    position = models.PositiveSmallIntegerField()  # 1, 2, 3 ... order in the itinerary
+    service = models.CharField(max_length=10, choices=TravelRequest.Service.choices)
+    origin = models.CharField(max_length=100, blank=True)  # empty for hotels
+    destination = models.CharField(max_length=100)  # city of the hotel for hotels
+    date = models.DateField()  # departure, or hotel check-in
+    end_date = models.DateField(null=True, blank=True)  # hotel check-out only
+    notes = models.CharField(max_length=300, blank=True)  # e.g. "Rajdhani 3AC", "window seat"
+    is_return = models.BooleanField(default=False)  # the way back of an earlier leg
+
+    # Filled in by the Travel Desk, per leg
+    booking_reference = models.CharField(max_length=50, blank=True)
+    actual_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    ticket = models.FileField(upload_to='tickets/', blank=True)
+    booked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['position']
+        constraints = [models.UniqueConstraint(fields=['request', 'position'], name='unique_leg_position')]
+
+    @property
+    def is_booked(self):
+        return self.booked_at is not None
+
+    def __str__(self):
+        route = self.destination if self.service == 'HOTEL' else f'{self.origin} → {self.destination}'
+        return f'{self.get_service_display()} {route}'
 
 
 class RequestEvent(models.Model):

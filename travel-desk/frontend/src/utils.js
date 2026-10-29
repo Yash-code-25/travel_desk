@@ -32,21 +32,29 @@ export function formatMoney(value) {
 export const todayISO = () => new Date().toLocaleDateString('en-CA') // YYYY-MM-DD, local time
 
 // ------------------------------------------------------------ trips
-export function routeText(r) {
-  return r.service === 'HOTEL' ? r.destination : `${r.origin} → ${r.destination}`
-}
-
 export function dateRange(r) {
   if (!r.end_date) return formatDate(r.start_date)
   const sameYear = r.start_date.slice(0, 4) === r.end_date.slice(0, 4)
   return `${formatDate(r.start_date, !sameYear)} – ${formatDate(r.end_date)}`
 }
 
+/** "3 days" for a whole trip (start_date … end_date). */
 export function tripLength(r) {
-  if (!r.end_date) return r.service === 'HOTEL' ? '' : 'One way'
+  if (!r.end_date) return 'Same day'
   const days = Math.round((new Date(r.end_date) - new Date(r.start_date)) / 86400000)
-  if (r.service === 'HOTEL') return `${days} night${days === 1 ? '' : 's'}`
-  return days === 0 ? 'Same-day return' : `${days + 1} days`
+  return `${days + 1} days`
+}
+
+/** One leg: "Pune → Mumbai" or "Hotel in Delhi". */
+export function legRoute(leg) {
+  return leg.service === 'HOTEL' ? `Hotel in ${leg.destination}` : `${leg.origin} → ${leg.destination}`
+}
+
+/** One leg's date: "12 Nov" or, for hotels, "12 Nov – 14 Nov · 2 nights". */
+export function legDates(leg) {
+  if (leg.service !== 'HOTEL' || !leg.end_date) return formatDate(leg.date)
+  const nights = Math.round((new Date(leg.end_date) - new Date(leg.date)) / 86400000)
+  return `${formatDate(leg.date, false)} – ${formatDate(leg.end_date)} · ${nights} night${nights === 1 ? '' : 's'}`
 }
 
 // ------------------------------------------------------------ people

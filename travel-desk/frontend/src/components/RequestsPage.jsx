@@ -4,7 +4,7 @@ import { ArrowUpDown, Inbox, Plus } from 'lucide-react'
 import { api } from '../api.js'
 import { PAGES, SERVICE_ICON } from '../constants.js'
 import { useDebounced, usePagedList } from '../hooks.js'
-import { dateRange, routeText, timeAgo, tripLength } from '../utils.js'
+import { dateRange, timeAgo, tripLength } from '../utils.js'
 import { Alert, Avatar, Badge, Button, EmptyState, Pager, SearchBox, StatCard, StatusBadge } from './ui.jsx'
 
 const SORTS = [
@@ -53,7 +53,7 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
       <section className="panel">
         <div className="panel-toolbar">
           <SearchBox value={search} onChange={setSearch}
-                     placeholder={showTraveller ? 'Search by code, employee or city…' : 'Search by code or city…'} />
+                     placeholder={showTraveller ? 'Search by code, traveller, employee or city…' : 'Search by code, traveller or city…'} />
           <label className="select-wrap">
             <ArrowUpDown size={14} />
             <select value={ordering} onChange={(e) => setOrdering(e.target.value)} aria-label="Sort">
@@ -69,15 +69,15 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
             <thead>
               <tr>
                 <th>Request</th>
-                {showTraveller && <th>Traveller</th>}
-                <th>Trip</th>
+                <th>Traveller</th>
+                <th>Itinerary</th>
                 <th>Travel dates</th>
                 <th>Status</th>
                 <th className="right">Updated</th>
               </tr>
             </thead>
             <tbody>
-              {!list.result && list.loading && <SkeletonRows columns={showTraveller ? 6 : 5} />}
+              {!list.result && list.loading && <SkeletonRows columns={6} />}
               {list.rows.map((r) => (
                 <RequestRow key={r.id} request={r} showTraveller={showTraveller} onOpen={onOpen} />
               ))}
@@ -101,7 +101,7 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
 }
 
 function RequestRow({ request: r, showTraveller, onOpen }) {
-  const Icon = SERVICE_ICON[r.service]
+  const bookingProgress = ['IN_PROGRESS', 'APPROVED'].includes(r.status) && r.legs_count > 1
   return (
     <tr tabIndex={0} onClick={() => onOpen(r.id)} onKeyDown={(e) => e.key === 'Enter' && onOpen(r.id)}>
       <td>
@@ -110,13 +110,29 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
           <strong>{r.request_code}</strong>
         </div>
       </td>
-      {showTraveller && <td><div className="person"><Avatar name={r.employee_name} size={26} />{r.employee_name}</div></td>}
+      <td>
+        <div className="person">
+          <Avatar name={r.traveller_name} size={26} />
+          <div>
+            <div>{r.traveller_name}</div>
+            {/* who asked for it, when the traveller is someone else (or on others' lists) */}
+            {(!r.traveller_is_requester || showTraveller) && r.employee_name !== r.traveller_name && (
+              <div className="subtle xs">requested by {r.employee_name}</div>
+            )}
+          </div>
+        </div>
+      </td>
       <td>
         <div className="trip">
-          <span className="trip-icon"><Icon size={15} /></span>
+          <span className="trip-icons">
+            {r.services.map((s) => { const Icon = SERVICE_ICON[s]; return <span key={s} className="trip-icon"><Icon size={14} /></span> })}
+          </span>
           <div>
-            <div className="trip-route">{routeText(r)}</div>
-            <div className="subtle xs">{r.service_label}{tripLength(r) && ` · ${tripLength(r)}`}</div>
+            <div className="trip-route">{r.route_summary}</div>
+            <div className="subtle xs">
+              {r.legs_count} booking{r.legs_count === 1 ? '' : 's'} · {tripLength(r)}
+              {bookingProgress && ` · ${r.legs_booked}/${r.legs_count} booked`}
+            </div>
           </div>
         </div>
       </td>

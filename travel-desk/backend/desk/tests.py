@@ -25,6 +25,11 @@ def day(n):
     return (timezone.localdate() + timedelta(days=n)).isoformat()
 
 
+def leg(service, origin, destination, date, end_date=None, is_return=False):
+    return dict(service=service, origin=origin, destination=destination, date=date,
+                end_date=end_date, is_return=is_return)
+
+
 @override_settings(MEDIA_ROOT=TMP_MEDIA)
 class WorkflowTests(TestCase):
     @classmethod
@@ -46,19 +51,46 @@ class WorkflowTests(TestCase):
         client.force_authenticate(User.objects.get(username=username))
         return client
 
-    def flight(self, **overrides):
-        data = dict(service='FLIGHT', origin='Pune', destination='Delhi',
-                    start_date=day(5), end_date=day(7), purpose='Client meeting with Acme')
-        data.update(overrides)
-        return data
+    def trip(self, service='FLIGHT', origin='Pune', destination='Delhi', start_date=None, end_date='default',
+             legs=None, **extra):
+        """Shortcut payload. A flight/train/cab with an end_date gets a return leg; a hotel uses it as check-out."""
+        start_date = start_date or day(5)
+        end_date = day(7) if end_date == 'default' else end_date
+        if legs is None:
+            if service == 'HOTEL':
+                legs = [leg('HOTEL', '', destination, start_date, end_date)]
+            else:
+                legs = [leg(service, origin, destination, start_date)]
+                if end_date:
+                    legs.append(leg(service, destination, origin, end_date, is_return=True))
+        return {'traveller_is_requester': True, 'legs': legs, 'purpose': 'Client meeting with Acme', **extra}
 
-    def create(self, username='asha', **overrides):
-        res = self.as_user(username).post('/api/requests/', self.flight(**overrides), format='json')
+    def post(self, username='asha', **trip_args):
+        return self.as_user(username).post('/api/requests/', self.trip(**trip_args), format='json')
+
+    def create(self, username='asha', **trip_args):
+        res = self.post(username, **trip_args)
         self.assertEqual(res.status_code, 201, res.data)
         return res.data['id']
 
+    def leg_errors(self, res):
+        """Field names with an error in any leg, e.g. {'date', 'destination'}."""
+        return {field for errs in res.data.get('legs', []) if isinstance(errs, dict) for field in errs}
+
     def act(self, username, pk, action, **extra):
         return self.as_user(username).post(f'/api/requests/{pk}/act/', {'action': action, **extra})
+
+    def leg_ids(self, pk):
+        return list(TravelRequest.objects.get(pk=pk).legs.values_list('pk', flat=True))
+
+    def book(self, pk, leg_id, agent='deepak', **extra):
+        data = dict(leg=leg_id, booking_reference='PNR123', actual_cost='5000', ticket=self.ticket())
+        data.update(extra)
+        return self.act(agent, pk, 'book_leg', **data)
+
+    def book_all(self, pk, agent='deepak'):
+        for leg_id in self.leg_ids(pk):
+            self.assertEqual(self.book(pk, leg_id, agent).status_code, 200)
 
     def status_of(self, pk):
         return TravelRequest.objects.get(pk=pk).status
@@ -70,9 +102,7 @@ class WorkflowTests(TestCase):
         pk = self.create()
         self.act('meera', pk, 'approve')
         self.act('deepak', pk, 'pick_up')
-        res = self.act('deepak', pk, 'book', booking_reference='PNR123', actual_cost='5000',
-                       ticket=self.ticket())
-        self.assertEqual(res.status_code, 200, res.data)
+        self.book_all(pk)
         return pk
 
     # ------------------------------------------------------------ happy path
@@ -81,55 +111,97 @@ class WorkflowTests(TestCase):
         req = TravelRequest.objects.get(pk=pk)
         self.assertEqual(req.status, S.BOOKED)
         self.assertTrue(req.request_code.startswith('TR-'))
-        self.assertEqual([e.action for e in req.events.all()], ['submit', 'approve', 'pick_up', 'book'])
-        self.assertTrue(Notification.objects.filter(user__username='asha', message__contains='booked').exists())
+        self.assertEqual([e.action for e in req.events.all()], ['submit', 'approve', 'pick_up', 'book_leg', 'book'])
+        self.assertTrue(Notification.objects.filter(user__username='asha', message__contains='fully booked').exists())
+        for leg_id in self.leg_ids(pk):
+            self.assertEqual(self.as_user('asha').get(f'/api/requests/{pk}/legs/{leg_id}/ticket/').status_code, 200)
 
-        res = self.as_user('asha').get(f'/api/requests/{pk}/ticket/')
-        self.assertEqual(res.status_code, 200)
+    # ------------------------------------------------------------ traveller
+    def test_requester_travelling_fills_traveller_automatically(self):
+        res = self.post()
+        self.assertEqual((res.data['traveller_name'], res.data['employee_name']), ('Asha Patil', 'Asha Patil'))
+
+    def test_booking_for_someone_else(self):
+        c = self.as_user('asha')
+        missing = c.post('/api/requests/', self.trip(traveller_is_requester=False), format='json')
+        self.assertIn('traveller_name', missing.data)
+        bad_phone = c.post('/api/requests/', self.trip(traveller_is_requester=False, traveller_name='Rahul Guest',
+                                                       traveller_phone='call me'), format='json')
+        self.assertIn('traveller_phone', bad_phone.data)
+
+        res = c.post('/api/requests/', self.trip(traveller_is_requester=False, traveller_name='Rahul Guest',
+                                                 traveller_phone='+91 98765 43210'), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        # The approver sees who travels AND who asked for it
+        row = self.as_user('meera').get('/api/requests/?scope=approvals&q=Rahul').data['results'][0]
+        self.assertEqual((row['traveller_name'], row['employee_name']), ('Rahul Guest', 'Asha Patil'))
+        self.assertTrue(Notification.objects.filter(user__username='meera', message__contains='for Rahul Guest').exists())
+
+    def test_same_dates_ok_for_different_travellers(self):
+        self.create()
+        self.create(traveller_is_requester=False, traveller_name='Rahul Guest')
+        dup = self.post()  # Asha again, same dates
+        self.assertIn('non_field_errors', dup.data)
+
+    # ------------------------------------------------------------ itinerary
+    def test_multi_leg_trip_in_one_request(self):
+        legs = [leg('TRAIN', 'Pune', 'Mumbai', day(5)), leg('FLIGHT', 'Mumbai', 'Delhi', day(5)),
+                leg('HOTEL', '', 'Delhi', day(5), day(7)), leg('FLIGHT', 'Delhi', 'Pune', day(7), is_return=True)]
+        res = self.post(legs=legs)
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual([l['position'] for l in res.data['legs']], [1, 2, 3, 4])
+        self.assertEqual(res.data['route_summary'], 'Pune → Mumbai → Delhi → Pune · Hotel in Delhi')
+        self.assertEqual((res.data['start_date'], res.data['end_date']), (day(5), day(7)))
+
+    def test_legs_must_be_in_date_order(self):
+        legs = [leg('FLIGHT', 'Pune', 'Delhi', day(8)), leg('HOTEL', '', 'Delhi', day(6), day(9))]
+        res = self.post(legs=legs)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('date', res.data['legs'][1])
+
+    def test_return_before_outbound_rejected(self):
+        res = self.post(end_date=day(3))  # return leg dated before departure
+        self.assertIn('date', res.data['legs'][1])
+
+    def test_return_needs_an_outbound_journey(self):
+        legs = [leg('HOTEL', '', 'Delhi', day(5), day(6)), leg('FLIGHT', 'Delhi', 'Pune', day(6), is_return=True)]
+        self.assertIn('is_return', self.leg_errors(self.post(legs=legs)))
+
+    def test_one_way_trip_allowed(self):
+        res = self.post(end_date=None)
+        self.assertEqual((res.status_code, len(res.data['legs']), res.data['end_date']), (201, 1, None))
+
+    def test_at_least_one_and_at_most_ten_legs(self):
+        self.assertIn('legs', self.post(legs=[]).data)
+        many = [leg('CAB', 'A', 'B', day(5)) for _ in range(11)]
+        self.assertIn('legs', self.post(legs=many).data)
 
     # ------------------------------------------------------------ form validation
     def test_past_date_rejected(self):
-        res = self.as_user('asha').post('/api/requests/', self.flight(start_date=day(-1), end_date=None), format='json')
+        res = self.post(start_date=day(-1), end_date=None)
         self.assertEqual(res.status_code, 400)
-        self.assertIn('start_date', res.data)
+        self.assertIn('date', self.leg_errors(res))
 
     def test_same_origin_and_destination_rejected(self):
-        res = self.as_user('asha').post('/api/requests/', self.flight(destination=' pune '), format='json')
-        self.assertIn('destination', res.data)
-
-    def test_return_before_departure_rejected(self):
-        res = self.as_user('asha').post('/api/requests/', self.flight(end_date=day(3)), format='json')
-        self.assertIn('end_date', res.data)
+        self.assertIn('destination', self.leg_errors(self.post(destination=' pune ', end_date=None)))
 
     def test_hotel_needs_checkout_after_checkin_and_ignores_origin(self):
-        c = self.as_user('asha')
-        res = c.post('/api/requests/', self.flight(service='HOTEL', end_date=None), format='json')
-        self.assertIn('end_date', res.data)
-        res = c.post('/api/requests/', self.flight(service='HOTEL', end_date=day(5)), format='json')
-        self.assertIn('end_date', res.data)
-        res = c.post('/api/requests/', self.flight(service='HOTEL', origin=''), format='json')
+        self.assertIn('end_date', self.leg_errors(self.post(service='HOTEL', end_date=None)))
+        self.assertIn('end_date', self.leg_errors(self.post(service='HOTEL', end_date=day(5))))
+        res = self.post(legs=[leg('HOTEL', 'Pune', 'Delhi', day(5), day(7))])
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data['origin'], '')
+        self.assertEqual(res.data['legs'][0]['origin'], '')
 
     def test_too_far_ahead_and_too_long_rejected(self):
-        c = self.as_user('asha')
-        self.assertIn('start_date', c.post('/api/requests/', self.flight(start_date=day(400), end_date=None), format='json').data)
-        self.assertIn('end_date', c.post('/api/requests/', self.flight(end_date=day(100)), format='json').data)
+        self.assertIn('date', self.leg_errors(self.post(start_date=day(400), end_date=None)))
+        self.assertIn('non_field_errors', self.post(end_date=day(100)).data)
 
     def test_short_purpose_rejected(self):
-        res = self.as_user('asha').post('/api/requests/', self.flight(purpose='trip'), format='json')
+        res = self.as_user('asha').post('/api/requests/', {**self.trip(), 'purpose': 'trip'}, format='json')
         self.assertIn('purpose', res.data)
 
-    def test_duplicate_overlapping_request_rejected(self):
-        self.create()
-        res = self.as_user('asha').post('/api/requests/', self.flight(start_date=day(6), end_date=day(8)), format='json')
-        self.assertEqual(res.status_code, 400)
-        self.assertIn('non_field_errors', res.data)
-        # A different destination is fine
-        self.create(destination='Mumbai')
-
     def test_employee_without_manager_cannot_submit(self):
-        res = self.as_user('newjoiner').post('/api/requests/', self.flight(), format='json')
+        res = self.post('newjoiner')
         self.assertEqual(res.status_code, 400)
         self.assertIn('manager', str(res.data))
 
@@ -167,21 +239,23 @@ class WorkflowTests(TestCase):
     def test_return_edit_resubmit_cycle(self):
         pk = self.create()
         c = self.as_user('asha')
+        train = {'legs': [leg('TRAIN', 'Pune', 'Delhi', day(5))]}
         # Can't edit while pending
-        self.assertEqual(c.put(f'/api/requests/{pk}/', {'destination': 'Goa'}, format='json').status_code, 409)
+        self.assertEqual(c.put(f'/api/requests/{pk}/', train, format='json').status_code, 409)
         self.act('meera', pk, 'return', comment='Take the train instead')
         self.assertIn('edit', c.get(f'/api/requests/{pk}/').data['allowed_actions'])
         # Others can't edit it
-        self.assertEqual(self.as_user('meera').put(f'/api/requests/{pk}/', {'service': 'TRAIN'}, format='json').status_code, 403)
-        res = c.put(f'/api/requests/{pk}/', {'service': 'TRAIN'}, format='json')
+        self.assertEqual(self.as_user('meera').put(f'/api/requests/{pk}/', train, format='json').status_code, 403)
+        res = c.put(f'/api/requests/{pk}/', train, format='json')
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data['status'], S.PENDING_APPROVAL)
-        self.assertEqual(res.data['service'], 'TRAIN')
+        self.assertEqual([l['service'] for l in res.data['legs']], ['TRAIN'])
 
     def test_edit_still_validated(self):
         pk = self.create()
         self.act('meera', pk, 'return', comment='fix')
-        res = self.as_user('asha').put(f'/api/requests/{pk}/', {'destination': 'Pune'}, format='json')
+        res = self.as_user('asha').put(f'/api/requests/{pk}/', {'legs': [leg('FLIGHT', 'Pune', 'Pune', day(5))]},
+                                       format='json')
         self.assertEqual(res.status_code, 400)
         self.assertEqual(self.status_of(pk), S.RETURNED)
 
@@ -209,9 +283,10 @@ class WorkflowTests(TestCase):
     # ------------------------------------------------------------ visibility
     def test_employees_only_see_their_own(self):
         pk = self.create()
+        leg_id = self.leg_ids(pk)[0]
         self.assertEqual(self.as_user('ravi').get(f'/api/requests/{pk}/').status_code, 404)
         self.assertEqual(self.as_user('ravi').get('/api/requests/').data['count'], 0)
-        self.assertEqual(self.as_user('ravi').get(f'/api/requests/{pk}/ticket/').status_code, 404)
+        self.assertEqual(self.as_user('ravi').get(f'/api/requests/{pk}/legs/{leg_id}/ticket/').status_code, 404)
 
     def test_desk_queue_only_for_desk(self):
         self.assertEqual(self.as_user('asha').get('/api/requests/?scope=desk').status_code, 403)
@@ -226,8 +301,7 @@ class WorkflowTests(TestCase):
         self.act('meera', pk, 'approve')
         self.assertEqual(self.act('deepak', pk, 'pick_up').status_code, 200)
         self.assertEqual(self.act('sara', pk, 'pick_up').status_code, 409)
-        self.assertEqual(self.act('sara', pk, 'book', booking_reference='X', actual_cost='1',
-                                  ticket=self.ticket()).status_code, 403)
+        self.assertEqual(self.book(pk, self.leg_ids(pk)[0], agent='sara').status_code, 403)
 
     def test_release_puts_back_in_queue(self):
         pk = self.create()
@@ -242,20 +316,40 @@ class WorkflowTests(TestCase):
         self.act('meera', pk, 'approve')
         self.assertEqual(self.act('asha', pk, 'pick_up').status_code, 403)
 
+    def test_each_leg_booked_separately(self):
+        pk = self.create()  # outbound + return = 2 legs
+        self.act('meera', pk, 'approve')
+        self.act('deepak', pk, 'pick_up')
+        first, second = self.leg_ids(pk)
+
+        self.assertEqual(self.book(pk, first, booking_reference='OUT-1').status_code, 200)
+        self.assertEqual(self.status_of(pk), S.IN_PROGRESS)  # one of two booked
+        row = self.as_user('deepak').get('/api/requests/?scope=desk').data['results'][0]
+        self.assertEqual((row['legs_booked'], row['legs_count']), (1, 2))
+
+        # Uploading again replaces that leg's ticket (e.g. a wrong file)
+        self.assertEqual(self.book(pk, first, booking_reference='OUT-2').status_code, 200)
+        other_trip = self.create(start_date=day(20), end_date=None)
+        self.assertIn('leg', self.book(pk, self.leg_ids(other_trip)[0]).data)  # leg of another trip
+        self.assertIn('leg', self.book(pk, '').data)  # no leg chosen
+
+        self.assertEqual(self.book(pk, second, booking_reference='BACK-1').status_code, 200)
+        req = TravelRequest.objects.get(pk=pk)
+        self.assertEqual(req.status, S.BOOKED)
+        self.assertEqual([l.booking_reference for l in req.legs.all()], ['OUT-2', 'BACK-1'])
+        self.assertEqual(req.total_actual_cost, 10000)
+
     def test_booking_validation(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
         self.act('deepak', pk, 'pick_up')
-        res = self.act('deepak', pk, 'book')
+        leg_id = self.leg_ids(pk)[0]
+        res = self.act('deepak', pk, 'book_leg', leg=leg_id)
         self.assertEqual(set(res.data), {'booking_reference', 'actual_cost', 'ticket'})
-        res = self.act('deepak', pk, 'book', booking_reference='P', actual_cost='-5', ticket=self.ticket())
-        self.assertIn('actual_cost', res.data)
-        res = self.act('deepak', pk, 'book', booking_reference='P', actual_cost='5',
-                       ticket=self.ticket('virus.exe'))
-        self.assertIn('ticket', res.data)
+        self.assertIn('actual_cost', self.book(pk, leg_id, actual_cost='-5').data)
+        self.assertIn('ticket', self.book(pk, leg_id, ticket=self.ticket('virus.exe')).data)
         big = SimpleUploadedFile('big.pdf', b'0' * (5 * 1024 * 1024 + 1))
-        res = self.act('deepak', pk, 'book', booking_reference='P', actual_cost='5', ticket=big)
-        self.assertIn('ticket', res.data)
+        self.assertIn('ticket', self.book(pk, leg_id, ticket=big).data)
         self.assertEqual(self.status_of(pk), S.IN_PROGRESS)
 
     def test_unavailable_returns_to_employee_and_needs_reapproval(self):
@@ -273,7 +367,8 @@ class WorkflowTests(TestCase):
         pk = self.create(estimated_cost='1000')
         self.act('meera', pk, 'approve')
         self.act('deepak', pk, 'pick_up')
-        self.act('deepak', pk, 'book', booking_reference='P', actual_cost='1500', ticket=self.ticket())
+        for leg_id in self.leg_ids(pk):
+            self.book(pk, leg_id, actual_cost='750')  # 2 x 750 = 1500 vs 1000 estimate
         self.assertTrue(Notification.objects.filter(user__username='meera', message__contains='above the estimate').exists())
 
     # ------------------------------------------------------------ cancellation
@@ -314,11 +409,14 @@ class WorkflowTests(TestCase):
         self.assertEqual(self.as_user('asha').delete(f'/api/requests/{pk}/').status_code, 405)
 
     # ------------------------------------------------------------ list, search, dashboard, speed
+    def separate_trips(self, cities, username='asha'):
+        """Trips on different dates (the same traveller can't have overlapping trips)."""
+        return [self.create(username, destination=c, start_date=day(5 + 3 * i), end_date=None)
+                for i, c in enumerate(cities)]
+
     def test_search_status_filter_and_pagination(self):
-        self.create(destination='Delhi')
-        self.create(destination='Mumbai')
-        mumbai_id = self.create(destination='Chennai')
-        self.act('meera', mumbai_id, 'approve')
+        _, _, chennai = self.separate_trips(['Delhi', 'Mumbai', 'Chennai'])
+        self.act('meera', chennai, 'approve')
         c = self.as_user('meera')
         self.assertEqual(c.get('/api/requests/?scope=approvals&q=mum').data['count'], 1)
         self.assertEqual(c.get('/api/requests/?scope=approvals&q=asha').data['count'], 3)
@@ -333,8 +431,7 @@ class WorkflowTests(TestCase):
         self.assertEqual(flags, {'PENDING_APPROVAL': True, 'APPROVED': False})
 
     def test_overdue_filter_and_dashboard_counts(self):
-        a = self.create(destination='Delhi')
-        self.create(destination='Mumbai')
+        a, _ = self.separate_trips(['Delhi', 'Mumbai'])
         TravelRequest.objects.filter(pk=a).update(submitted_at=timezone.now() - timedelta(hours=72))
         c = self.as_user('meera')
         self.assertEqual(c.get('/api/requests/?scope=approvals&overdue=1').data['count'], 1)
@@ -350,21 +447,19 @@ class WorkflowTests(TestCase):
                 self.assertEqual(client.get('/api/requests/?scope=approvals').status_code, 200)
             return len(ctx)
 
-        for city in ['Delhi', 'Goa']:
-            self.create(destination=city)
+        self.separate_trips(['Delhi', 'Goa'])
         few = count_queries()
-        for city in ['Agra', 'Jaipur', 'Surat', 'Indore', 'Nagpur', 'Kochi']:
-            self.create(destination=city)
+        self.separate_trips(['Agra', 'Jaipur', 'Surat', 'Indore', 'Nagpur', 'Kochi'], username='ravi')
         self.assertEqual(count_queries(), few)  # no N+1: 8 rows cost the same as 2
-        # ~8 data queries + a few fixed cache queries (rate limiting lives in the DB cache).
-        self.assertLessEqual(few, 15)
+        # ~9 data queries + a few fixed cache queries (rate limiting lives in the DB cache).
+        self.assertLessEqual(few, 16)
 
     def test_fake_ticket_file_rejected_and_logged(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
         self.act('deepak', pk, 'pick_up')
         fake = SimpleUploadedFile('ticket.pdf', b'MZ\x90\x00 this is really an exe')
-        res = self.act('deepak', pk, 'book', booking_reference='P', actual_cost='5', ticket=fake)
+        res = self.book(pk, self.leg_ids(pk)[0], ticket=fake)
         self.assertEqual(res.status_code, 400)
         self.assertIn('not a real', str(res.data['ticket']))
         self.assertTrue(SecurityEvent.objects.filter(type='UPLOAD_REJECTED', username='deepak').exists())

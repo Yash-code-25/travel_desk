@@ -20,7 +20,7 @@ from django.utils import timezone
 from rest_framework import status as http
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 
-from .models import Notification, Profile, RequestEvent, SecurityEvent, TravelRequest
+from .models import Notification, Profile, RequestEvent, SecurityEvent, TravelRequest, TripLeg
 from .security import file_matches_extension, log_event
 
 User = get_user_model()
@@ -47,14 +47,15 @@ ACTIONS = {
     'pick_up':        dict(src=[S.APPROVED], dst=S.IN_PROGRESS, who='desk'),
     'release':        dict(src=[S.IN_PROGRESS], dst=S.APPROVED, who='agent'),
     'unavailable':    dict(src=[S.IN_PROGRESS], dst=S.RETURNED, who='agent', reason=True),
-    'book':           dict(src=[S.IN_PROGRESS], dst=S.BOOKED, who='agent'),
+    # One leg at a time (flight / train / cab / hotel). The trip becomes BOOKED when every leg is booked.
+    'book_leg':       dict(src=[S.IN_PROGRESS], dst=S.BOOKED, who='agent'),
     'confirm_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.CANCELLED, who='desk'),
     'decline_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.BOOKED, who='desk', reason=True),
     'complete':       dict(src=[S.BOOKED], dst=S.COMPLETED, who='desk'),
 }
 
 # These need the trip to still be in the future.
-FUTURE_ONLY_ACTIONS = {'approve', 'pick_up', 'book', 'resubmit'}
+FUTURE_ONLY_ACTIONS = {'approve', 'pick_up', 'book_leg', 'resubmit'}
 
 
 # ---------------------------------------------------------------- roles
@@ -166,11 +167,14 @@ def _notify_for(action, req, actor, comment, old_status):
     reason = f' Reason: {comment}' if comment else ''
     emp = req.employee
 
+    traveller = '' if req.traveller_is_requester else f' for {req.traveller_name}'
+
     if action in ('submit', 'resubmit'):
-        notify([req.approver], req, f'{who} submitted {code} to {req.destination} for your approval.', actor)
+        notify([req.approver], req,
+               f'{who} submitted {code}{traveller} ({req.route_summary}) for your approval.', actor)
     elif action == 'approve':
         notify([emp], req, f'{code} was approved by {who} and sent to the Travel Desk.', actor)
-        notify(desk_team(), req, f'{code} ({emp.username}, {req.destination}) is waiting in the desk queue.', actor)
+        notify(desk_team(), req, f'{code} ({req.traveller_name}: {req.route_summary}) is waiting in the desk queue.', actor)
     elif action == 'return':
         notify([emp], req, f'{who} returned {code} for changes.{reason}', actor)
     elif action == 'reject':
@@ -190,8 +194,9 @@ def _notify_for(action, req, actor, comment, old_status):
     elif action == 'unavailable':
         notify([emp, req.approver], req,
                f'{code} could not be booked as requested. Please change and resubmit.{reason}', actor)
-    elif action == 'book':
-        notify([emp], req, f'{code} is booked! Reference: {req.booking_reference}. Ticket is attached.', actor)
+    elif action == 'book_leg' and req.status == S.BOOKED:
+        refs = ', '.join(leg.booking_reference for leg in req.legs.all())
+        notify([emp], req, f'{code} is fully booked{traveller}! References: {refs}. Tickets are attached.', actor)
     elif action == 'confirm_cancel':
         notify([emp], req, f'Cancellation of {code} is confirmed.', actor)
     elif action == 'decline_cancel':
@@ -235,7 +240,7 @@ def perform_action(user, pk, action, comment='', data=None, files=None):
     # Check the uploaded booking files BEFORE the transaction, so a rejected upload
     # is still recorded in the security log (a rollback would erase it).
     booking = None
-    if action == 'book':
+    if action == 'book_leg':
         pre = TravelRequest.objects.filter(pk=pk).first()
         if pre and can_act(user, pre, rule['who']) and pre.status in rule['src']:
             booking = _validate_booking(pre, user, data, files or {})
@@ -270,12 +275,22 @@ def perform_action(user, pk, action, comment='', data=None, files=None):
         elif action == 'resubmit':
             req.approver = get_approver(req.employee)  # manager may have changed meanwhile
             req.submitted_at = timezone.now()
-        elif action == 'book':
-            extra_note = _save_booking(req, booking or _validate_booking(req, user, data, files or {}))
+        elif action == 'book_leg':
+            leg = _leg_of(req, data.get('leg'))
+            _save_booking(req, leg, booking or _validate_booking(req, user, data, files or {}))
+            done = [l for l in req.legs.all() if l.is_booked]
+            if len(done) < len(req.legs.all()):
+                # Not finished yet: stay "Booking in progress", just record this leg.
+                req.save(update_fields=['updated_at'])
+                _log(req, user, 'book_leg', old_status,
+                     comment or f'Booking {leg.position} of {len(req.legs.all())} done: {leg} · {leg.booking_reference}')
+                return req
+            extra_note = _cost_overrun_note(req)
 
         req.status = rule['dst']
         req.save()
-        _log(req, user, action, old_status, comment or extra_note)
+        # When the last leg is booked, the history says "booked the trip".
+        _log(req, user, 'book' if action == 'book_leg' else action, old_status, comment or extra_note)
         _notify_for(action, req, user, comment, old_status)
         if extra_note:
             notify([req.approver], req, f'{req.request_code}: {extra_note}', user)
@@ -320,19 +335,31 @@ def _validate_booking(req, user, data, files):
     return reference, cost, ticket, ext
 
 
-def _save_booking(req, booking):
-    """Store the validated booking on the request. Returns a cost warning note (or '')."""
-    reference, cost, ticket, ext = booking
-    req.booking_reference = reference
-    req.actual_cost = cost
-    if req.ticket:
-        req.ticket.delete(save=False)  # replace old file (e.g. re-booking after a declined cancel)
-    req.ticket.save(f'{req.request_code}{ext}', ticket, save=False)
+def _leg_of(req, leg_id):
+    """The leg being booked; it must belong to this request."""
+    try:
+        return req.legs.get(pk=int(leg_id))
+    except (TypeError, ValueError, TripLeg.DoesNotExist):
+        raise ValidationError({'leg': ['Choose which booking (leg) this ticket is for.']})
 
-    if req.estimated_cost and cost > req.estimated_cost:
-        over = (cost - req.estimated_cost) / req.estimated_cost * 100
+
+def _save_booking(req, leg, booking):
+    """Store the validated booking on one leg. Uploading again replaces that leg's ticket."""
+    reference, cost, ticket, ext = booking
+    leg.booking_reference, leg.actual_cost, leg.booked_at = reference, cost, timezone.now()
+    if leg.ticket:
+        leg.ticket.delete(save=False)
+    leg.ticket.save(f'{req.request_code}-{leg.position}{ext}', ticket, save=False)
+    leg.save()
+
+
+def _cost_overrun_note(req):
+    """Warn the approver when the whole trip costs much more than estimated."""
+    total = req.total_actual_cost
+    if req.estimated_cost and total and total > req.estimated_cost:
+        over = (total - req.estimated_cost) / req.estimated_cost * 100
         if over >= settings.COST_OVERRUN_ALERT_PERCENT:
-            return f'Actual cost {cost} is {over:.0f}% above the estimate of {req.estimated_cost}.'
+            return f'Actual cost {total} is {over:.0f}% above the estimate of {req.estimated_cost}.'
     return ''
 
 

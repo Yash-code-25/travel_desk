@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Notification, Profile, RequestEvent, SecurityEvent, TravelRequest
+from .models import Notification, Profile, RequestEvent, SecurityEvent, TravelRequest, TripLeg
 
 
 @admin.register(Profile)
@@ -15,12 +15,19 @@ class EventInline(admin.TabularInline):
     readonly_fields = ['actor', 'action', 'from_status', 'to_status', 'comment', 'created_at']
 
 
+class LegInline(admin.TabularInline):
+    model = TripLeg
+    extra = 0
+    fields = ['position', 'service', 'origin', 'destination', 'date', 'end_date', 'is_return',
+              'booking_reference', 'actual_cost', 'ticket', 'booked_at']
+
+
 @admin.register(TravelRequest)
 class TravelRequestAdmin(admin.ModelAdmin):
-    list_display = ['request_code', 'employee', 'service', 'destination', 'start_date', 'status']
-    list_filter = ['status', 'service']
-    search_fields = ['request_code', 'destination', 'employee__username']
-    inlines = [EventInline]
+    list_display = ['request_code', 'traveller_name', 'employee', 'route_summary', 'start_date', 'status']
+    list_filter = ['status', 'legs__service']
+    search_fields = ['request_code', 'traveller_name', 'legs__destination', 'employee__username']
+    inlines = [LegInline, EventInline]
 
 
 admin.site.register(Notification)

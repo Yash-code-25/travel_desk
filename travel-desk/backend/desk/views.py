@@ -16,7 +16,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from . import security, services
-from .models import SecurityEvent, TravelRequest
+from .models import SecurityEvent, TravelRequest, TripLeg
 from .serializers import TravelRequestListSerializer, TravelRequestSerializer
 
 User = get_user_model()
@@ -219,7 +219,8 @@ class TravelRequestViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
     GET  /api/requests/<id>/
     PUT  /api/requests/<id>/               edit a RETURNED request (re-submits it)
     POST /api/requests/<id>/act/           {action, comment, ...}  every workflow step
-    GET  /api/requests/<id>/ticket/        download ticket (permission checked)
+                                           (desk: action=book_leg, leg=<leg id>, ticket file ...)
+    GET  /api/requests/<id>/legs/<leg>/ticket/   download one leg's ticket (permission checked)
     No DELETE: requests are cancelled, never deleted (audit trail).
     """
 
@@ -230,7 +231,7 @@ class TravelRequestViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         services.maybe_auto_close()
         params = self.request.query_params
         qs = scoped_queryset(self.request.user, params.get('scope')).select_related(
-            'employee', 'approver', 'desk_agent')
+            'employee', 'approver', 'desk_agent').prefetch_related('legs')
 
         if self.action != 'list':
             return qs.prefetch_related('events__actor')
@@ -242,8 +243,10 @@ class TravelRequestViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
             qs = qs.filter(overdue_q())
         q = params.get('q', '').strip()[:100]
         if q:
+            matching_legs = TripLeg.objects.filter(Q(origin__icontains=q) | Q(destination__icontains=q))
             qs = qs.filter(
-                Q(request_code__icontains=q) | Q(origin__icontains=q) | Q(destination__icontains=q)
+                Q(request_code__icontains=q) | Q(traveller_name__icontains=q)
+                | Q(pk__in=matching_legs.values('request'))
                 | Q(employee__first_name__icontains=q) | Q(employee__last_name__icontains=q)
                 | Q(employee__username__icontains=q)
             )
@@ -274,17 +277,18 @@ class TravelRequestViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         )
         return Response(self._fresh(req.pk))
 
-    @action(detail=True, methods=['get'])
-    def ticket(self, request, pk=None):
-        req = self.get_object()
-        if not req.ticket:
+    @action(detail=True, methods=['get'], url_path=r'legs/(?P<leg_id>\d+)/ticket')
+    def ticket(self, request, pk=None, leg_id=None):
+        req = self.get_object()  # 404 if this user can't see the request
+        leg = req.legs.filter(pk=leg_id).first()
+        if not leg or not leg.ticket:
             raise Http404('No ticket uploaded.')
-        return FileResponse(req.ticket.open('rb'), as_attachment=True,
-                            filename=os.path.basename(req.ticket.name))
+        return FileResponse(leg.ticket.open('rb'), as_attachment=True,
+                            filename=os.path.basename(leg.ticket.name))
 
     def _fresh(self, pk):
-        req = TravelRequest.objects.select_related(
-            'employee', 'approver', 'desk_agent').prefetch_related('events__actor').get(pk=pk)
+        req = TravelRequest.objects.select_related('employee', 'approver', 'desk_agent') \
+            .prefetch_related('legs', 'events__actor').get(pk=pk)
         return self.get_serializer(req).data
 
 

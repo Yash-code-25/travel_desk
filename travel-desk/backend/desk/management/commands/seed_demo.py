@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from desk import services
 from desk.models import Profile, TravelRequest
+from desk.serializers import save_legs, trip_dates
 
 User = get_user_model()
 
@@ -24,24 +25,35 @@ DEMO_USERS = [
     ('sara', 'Sara', 'Khan', 'DESK', 'director', 'Travel Desk'),
 ]
 
-# employee, service, origin, destination, starts in N days, length in days, cost, purpose, steps
-# steps = list of (username, action, comment) run through the real workflow
+# Each sample trip:
+#   requester, traveller (None = the requester; or (name, phone) for someone else),
+#   legs = [(service, origin, destination, starts in N days, hotel nights, is_return)],
+#   estimated cost, purpose, steps = [(username, action, comment)] run through the real workflow.
 SAMPLE_TRIPS = [
-    ('asha', 'FLIGHT', 'Pune', 'Bengaluru', 6, 2, 9500, 'Product demo for Infosys procurement team', []),
-    ('ravi', 'TRAIN', 'Mumbai', 'Ahmedabad', 10, 1, 2400, 'Quarterly review with Gujarat distributors', []),
-    ('ravi', 'HOTEL', '', 'Hyderabad', 14, 2, 12000, 'Two-day partner workshop at Hitech City',
-     [('meera', 'approve', '')]),
-    ('asha', 'CAB', 'Pune', 'Mumbai Airport', 4, 0, 3500, 'Airport drop for international client visit',
-     [('meera', 'approve', ''), ('sara', 'pick_up', '')]),
-    ('ravi', 'FLIGHT', 'Delhi', 'Kolkata', 20, 2, 11000, 'Annual contract renewal meeting with Tata Steel',
+    ('asha', None, [('FLIGHT', 'Pune', 'Bengaluru', 6, 0, False), ('FLIGHT', 'Bengaluru', 'Pune', 8, 0, True)],
+     9500, 'Product demo for Infosys procurement team', []),
+    ('ravi', None, [('TRAIN', 'Pune', 'Mumbai', 10, 0, False), ('FLIGHT', 'Mumbai', 'Delhi', 10, 0, False),
+                    ('HOTEL', '', 'Delhi', 10, 2, False), ('FLIGHT', 'Delhi', 'Pune', 12, 0, True)],
+     24000, 'Quarterly review with North India distributors', []),
+    ('ravi', ('Kavita Menon (guest speaker)', '+91 98200 11223'),
+     [('FLIGHT', 'Chennai', 'Hyderabad', 14, 0, False), ('HOTEL', '', 'Hyderabad', 14, 2, False),
+      ('FLIGHT', 'Hyderabad', 'Chennai', 16, 0, True)],
+     21000, 'Guest speaker for the partner workshop at Hitech City', [('meera', 'approve', '')]),
+    ('asha', None, [('CAB', 'Pune', 'Mumbai Airport', 4, 0, False)], 3500,
+     'Airport drop for international client visit', [('meera', 'approve', ''), ('sara', 'pick_up', '')]),
+    ('ravi', None, [('FLIGHT', 'Delhi', 'Kolkata', 20, 0, False), ('FLIGHT', 'Kolkata', 'Delhi', 22, 0, True)],
+     11000, 'Annual contract renewal meeting with Tata Steel',
      [('meera', 'return', 'Please take the early morning flight so you can skip the hotel night.')]),
-    ('meera', 'FLIGHT', 'Mumbai', 'Goa', 25, 3, 15000, 'Regional sales offsite planning with the West team', []),
-    ('asha', 'HOTEL', '', 'Chennai', 30, 2, 9000, 'Customer onboarding sessions at the Chennai branch',
-     [('meera', 'approve', ''), ('deepak', 'pick_up', ''), ('deepak', 'book', '')]),
-    ('ravi', 'FLIGHT', 'Pune', 'Jaipur', 12, 1, 8000, 'Trade fair visit to scout new channel partners',
-     [('meera', 'reject', 'Budget freeze on trade fairs this quarter.')]),
-    ('asha', 'TRAIN', 'Pune', 'Nashik', 9, 0, 900, 'Site visit for the Nashik warehouse rollout',
-     [('asha', 'cancel', '')]),
+    ('meera', None, [('FLIGHT', 'Mumbai', 'Goa', 25, 0, False), ('HOTEL', '', 'Goa', 25, 3, False),
+                     ('FLIGHT', 'Goa', 'Mumbai', 28, 0, True)],
+     15000, 'Regional sales offsite planning with the West team', []),
+    ('asha', None, [('TRAIN', 'Pune', 'Chennai', 30, 0, False), ('HOTEL', '', 'Chennai', 31, 2, False)],
+     9000, 'Customer onboarding sessions at the Chennai branch',
+     [('meera', 'approve', ''), ('deepak', 'pick_up', ''), ('deepak', 'book_all', '')]),
+    ('ravi', None, [('FLIGHT', 'Pune', 'Jaipur', 12, 0, False)], 8000,
+     'Trade fair visit to scout new channel partners', [('meera', 'reject', 'Budget freeze on trade fairs this quarter.')]),
+    ('asha', None, [('TRAIN', 'Pune', 'Nashik', 9, 0, False)], 900,
+     'Site visit for the Nashik warehouse rollout', [('asha', 'cancel', '')]),
 ]
 
 
@@ -80,29 +92,36 @@ class Command(BaseCommand):
     def create_trips(self):
         today = timezone.localdate()
         users = {u.username: u for u in User.objects.all()}
-        for emp, service, origin, dest, start_in, days, cost, purpose, steps in SAMPLE_TRIPS:
+        for emp, traveller, legs, cost, purpose, steps in SAMPLE_TRIPS:
             employee = users[emp]
-            start = today + timedelta(days=start_in)
+            legs = [dict(service=s, origin=o, destination=d, date=today + timedelta(days=day),
+                         end_date=today + timedelta(days=day + nights) if nights else None, is_return=back)
+                    for s, o, d, day, nights, back in legs]
+            start, end = trip_dates(legs)
+            name, phone = traveller or (services.display_name(employee), '')
             req = TravelRequest.objects.create(
-                employee=employee, approver=services.get_approver(employee), service=service,
-                origin=origin, destination=dest, start_date=start,
-                end_date=start + timedelta(days=days) if days else None,
-                purpose=purpose, estimated_cost=cost, submitted_at=timezone.now(),
+                employee=employee, approver=services.get_approver(employee),
+                traveller_is_requester=traveller is None, traveller_name=name, traveller_phone=phone,
+                traveller_email=employee.email if traveller is None else '',
+                start_date=start, end_date=end, purpose=purpose, estimated_cost=cost, submitted_at=timezone.now(),
             )
+            save_legs(req, legs)
             services._log(req, employee, 'submit', '')
             services._notify_for('submit', req, employee, '', '')
 
             for actor, action, comment in steps:
-                extra = {}
-                if action == 'book':
-                    extra = dict(
-                        data={'booking_reference': f'PNR{req.pk:04d}X', 'actual_cost': str(cost)},
-                        files={'ticket': SimpleUploadedFile('ticket.pdf', b'%PDF-1.4 demo ticket')},
-                    )
-                services.perform_action(users[actor], req.pk, action, comment, **extra)
+                if action == 'book_all':  # the desk books every leg, one ticket each
+                    for leg in req.legs.all():
+                        services.perform_action(
+                            users[actor], req.pk, 'book_leg', '',
+                            data={'leg': leg.pk, 'booking_reference': f'PNR{req.pk:03d}{leg.position}X',
+                                  'actual_cost': str(cost // len(legs))},
+                            files={'ticket': SimpleUploadedFile('ticket.pdf', b'%PDF-1.4 demo ticket')})
+                else:
+                    services.perform_action(users[actor], req.pk, action, comment)
 
         # Make the first one overdue so the "Overdue" card has something to show.
-        first = TravelRequest.objects.filter(destination='Bengaluru').first()
+        first = TravelRequest.objects.filter(purpose__startswith='Product demo').first()
         if first:
             TravelRequest.objects.filter(pk=first.pk).update(submitted_at=timezone.now() - timedelta(hours=60))
         self.stdout.write(f'Created {len(SAMPLE_TRIPS)} sample trips.')

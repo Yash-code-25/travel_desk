@@ -1,12 +1,12 @@
-// Side panel for one travel request: status, next-step actions, booking, details and history.
+// Side panel for one travel request: status, next step, itinerary (with per-leg tickets), details and history.
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Download, FileText, TriangleAlert, Upload, X } from 'lucide-react'
+import { Check, Download, FileText, TriangleAlert, Undo2, Upload, X } from 'lucide-react'
 import { allErrors, api } from '../api.js'
 import { ACTIONS, EVENT_LABELS, SERVICE_ICON, STEPS, STEP_OF, sortActions } from '../constants.js'
 import { useEscape } from '../hooks.js'
-import { dateRange, formatDateTime, formatMoney, routeText, timeAgo, tripLength } from '../utils.js'
+import { dateRange, formatDateTime, formatMoney, legDates, legRoute, timeAgo, tripLength } from '../utils.js'
 import { useToast } from './Toast.jsx'
-import { Alert, Avatar, Banner, Button, Field, Spinner, StatusBadge } from './ui.jsx'
+import { Alert, Avatar, Badge, Banner, Button, Field, Spinner, StatusBadge } from './ui.jsx'
 
 const MAX_TICKET_MB = 5
 const TICKET_TYPES = ['pdf', 'png', 'jpg', 'jpeg']
@@ -16,8 +16,9 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
   const toast = useToast()
   const [req, setReq] = useState(null)
   const [loadError, setLoadError] = useState('')
-  const [active, setActive] = useState(null) // action waiting for a reason / confirmation / booking details
+  const [active, setActive] = useState(null) // action waiting for a reason / confirmation
   const [reason, setReason] = useState('')
+  const [bookingLeg, setBookingLeg] = useState(null) // id of the leg whose ticket is being uploaded
   const [booking, setBooking] = useState(EMPTY_BOOKING)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false) // disables buttons, so nothing is submitted twice
@@ -25,39 +26,25 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
   const load = useCallback(() =>
     api(`/requests/${id}/`).then((r) => { setReq(r); setLoadError('') }).catch((e) => setLoadError(e.message)), [id])
 
-  function closePanel() {
-    setActive(null); setReason(''); setBooking(EMPTY_BOOKING); setError('')
+  function closePanels() {
+    setActive(null); setReason(''); setBookingLeg(null); setBooking(EMPTY_BOOKING); setError('')
   }
 
-  useEffect(() => { setReq(null); closePanel(); load() }, [id, load])
+  useEffect(() => { setReq(null); closePanels(); load() }, [id, load])
   useEffect(() => { if (refreshKey) load() }, [refreshKey, load]) // changed elsewhere, e.g. by the edit form
 
-  // Esc closes the open action panel first, then the drawer.
-  useEscape(() => (active ? closePanel() : onClose()))
+  // Esc closes an open panel first, then the drawer.
+  useEscape(() => (active || bookingLeg ? closePanels() : onClose()))
 
-  function start(action) {
-    setError('')
-    if (action === 'edit') return onEdit(req)
-    const meta = ACTIONS[action]
-    if (meta.reason || meta.confirm || action === 'book') return setActive(action)
-    submit(action)
-  }
-
-  async function submit(action) {
-    const meta = ACTIONS[action]
-    if (meta.reason && !reason.trim()) return setError('Please add a reason. It is shared with everyone involved.')
-    if (action === 'book') {
-      const problem = checkBooking(booking) // instant feedback; the server checks again
-      if (problem) return setError(problem)
-    }
-
+  /** Runs a workflow step on the server and shows the updated request. */
+  async function send(body, doneMessage) {
     setBusy(true)
     try {
-      const updated = await api(`/requests/${id}/act/`, { method: 'POST', body: actionBody(action, reason, booking) })
+      const updated = await api(`/requests/${id}/act/`, { method: 'POST', body })
       setReq(updated)
-      closePanel()
+      closePanels()
       onChanged()
-      toast(meta.done)
+      toast(doneMessage(updated))
     } catch (e) {
       setError(allErrors(e))
       if (e.status === 409 || e.status === 404) { load(); onChanged() } // someone else changed it meanwhile
@@ -65,6 +52,32 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
       setBusy(false)
     }
   }
+
+  function start(action) {
+    closePanels()
+    if (action === 'edit') return onEdit(req)
+    const meta = ACTIONS[action]
+    if (meta.reason || meta.confirm) return setActive(action)
+    send({ action, comment: '' }, () => meta.done)
+  }
+
+  function confirmAction() {
+    const meta = ACTIONS[active]
+    if (meta.reason && !reason.trim()) return setError('Please add a reason. It is shared with everyone involved.')
+    send({ action: active, comment: reason }, () => meta.done)
+  }
+
+  function saveBooking(leg) {
+    const problem = checkBooking(booking) // instant feedback; the server checks again
+    if (problem) return setError(problem)
+    send(bookingForm(leg.id, booking), (updated) => updated.status === 'BOOKED'
+      ? 'All bookings done: the trip is booked and the requester notified'
+      : `Booking ${leg.position} saved`)
+  }
+
+  const canBook = req?.allowed_actions.includes('book_leg')
+  const buttons = req ? sortActions(req.allowed_actions.filter((a) => a !== 'book_leg')) : []
+  const booked = req ? req.legs.filter((l) => l.is_booked).length : 0
 
   return (
     <>
@@ -74,7 +87,7 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
           {req ? (
             <div>
               <div className="drawer-title"><h2>{req.request_code}</h2><StatusBadge status={req.status} /></div>
-              <p className="subtle">{req.service_label} · {routeText(req)} · created {timeAgo(req.created_at)}</p>
+              <p className="subtle">{req.route_summary} · created {timeAgo(req.created_at)}</p>
             </div>
           ) : <div className="subtle">{loadError || 'Loading…'}</div>}
           <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={20} /></button>
@@ -86,30 +99,41 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
           <div className="drawer-body">
             <StatusBanner req={req} />
             <Stepper status={req.status} />
+            <TravellerCard req={req} />
 
-            {req.allowed_actions.length > 0 && (
+            {(buttons.length > 0 || canBook) && (
               <section className="action-card">
                 {active ? (
                   <ActionPanel action={active} busy={busy} reason={reason} setReason={setReason}
-                               booking={booking} setBooking={setBooking} estimate={req.estimated_cost}
-                               onBack={closePanel} onConfirm={() => submit(active)} />
+                               onBack={closePanels} onConfirm={confirmAction} />
                 ) : (
                   <>
                     <p className="section-label">Your next step</p>
-                    <div className="action-row">
-                      {sortActions(req.allowed_actions).map((a) => (
-                        <Button key={a} kind={ACTIONS[a]?.kind} loading={busy} onClick={() => start(a)}>
-                          {ACTIONS[a]?.label || a}
-                        </Button>
-                      ))}
-                    </div>
+                    {canBook && (
+                      <p className="booking-progress">
+                        Upload a ticket for each booking below: <strong>{booked} of {req.legs.length} done</strong>.
+                        The trip is marked Booked automatically when all are done.
+                      </p>
+                    )}
+                    {buttons.length > 0 && (
+                      <div className="action-row">
+                        {buttons.map((a) => (
+                          <Button key={a} kind={ACTIONS[a]?.kind} loading={busy && !bookingLeg} onClick={() => start(a)}>
+                            {ACTIONS[a]?.label || a}
+                          </Button>
+                        ))}
+                      </div>
+                    )}
                   </>
                 )}
-                <Alert>{error}</Alert>
+                {!bookingLeg && <Alert>{error}</Alert>}
               </section>
             )}
 
-            {req.has_ticket && <TicketCard req={req} />}
+            <Itinerary req={req} canBook={canBook} bookingLeg={bookingLeg} busy={busy} error={bookingLeg ? error : ''}
+                       booking={booking} setBooking={setBooking}
+                       onStartBooking={(leg) => { closePanels(); setBookingLeg(leg.id) }}
+                       onCancelBooking={closePanels} onSaveBooking={saveBooking} />
             <TripDetails req={req} />
             <Activity events={req.events} />
           </div>
@@ -129,12 +153,11 @@ function checkBooking({ booking_reference, actual_cost, ticket }) {
   return ''
 }
 
-/** JSON for normal actions; a multipart form when a ticket file is uploaded. */
-function actionBody(action, reason, booking) {
-  if (action !== 'book') return { action, comment: reason }
+/** Multipart form: one leg's booking reference, cost and ticket file. */
+function bookingForm(legId, booking) {
   const form = new FormData()
-  form.append('action', 'book')
-  form.append('comment', reason)
+  form.append('action', 'book_leg')
+  form.append('leg', legId)
   form.append('booking_reference', booking.booking_reference.trim())
   form.append('actual_cost', booking.actual_cost)
   form.append('ticket', booking.ticket)
@@ -178,34 +201,106 @@ function Stepper({ status }) {
   )
 }
 
-/** Reason box / "are you sure?" / booking form for the chosen action. */
-function ActionPanel({ action, busy, reason, setReason, booking, setBooking, estimate, onBack, onConfirm }) {
+/** Who travels, and who asked for it when that's someone else. */
+function TravellerCard({ req }) {
+  const contact = [req.traveller_phone, req.traveller_email].filter(Boolean).join(' · ')
+  return (
+    <section className="traveller-card">
+      <Avatar name={req.traveller_name} size={40} />
+      <div>
+        <p className="section-label">Traveller</p>
+        <strong>{req.traveller_name}</strong>
+        {contact && <p className="subtle xs">{contact}</p>}
+      </div>
+      <div className="requested-by">
+        <p className="section-label">Requested by</p>
+        <strong>{req.employee_name}</strong>
+        {req.traveller_is_requester && <p className="subtle xs">travelling themselves</p>}
+      </div>
+    </section>
+  )
+}
+
+/** "Are you sure?" or reason box for the chosen action. */
+function ActionPanel({ action, busy, reason, setReason, onBack, onConfirm }) {
   const meta = ACTIONS[action]
-  const isBooking = action === 'book'
   return (
     <div className="confirm-panel">
       <p className="confirm-title">{meta.label}</p>
       {meta.confirm && <p className="subtle">{meta.confirm}</p>}
-      {isBooking && <BookingFields booking={booking} setBooking={setBooking} estimate={estimate} />}
-      {(meta.reason || isBooking) && (
-        <Field label={meta.reason || 'Note for the employee'} optional={isBooking}>
-          <textarea autoFocus={!isBooking} rows={3} value={reason} onChange={(e) => setReason(e.target.value)}
-                    placeholder="Write a short note…" />
+      {meta.reason && (
+        <Field label={meta.reason}>
+          <textarea autoFocus rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Write a short note…" />
         </Field>
       )}
       <div className="action-row end">
         <Button onClick={onBack} disabled={busy}>Back</Button>
-        <Button kind={meta.kind} loading={busy} onClick={onConfirm}>{isBooking ? 'Confirm booking' : meta.label}</Button>
+        <Button kind={meta.kind} loading={busy} onClick={onConfirm}>{meta.label}</Button>
       </div>
     </div>
   )
 }
 
-function BookingFields({ booking, setBooking, estimate }) {
+/** Every booking of the trip, each with its own status, ticket and (for the desk) upload form. */
+function Itinerary({ req, canBook, bookingLeg, busy, error, booking, setBooking, onStartBooking, onCancelBooking, onSaveBooking }) {
+  const showBookingState = ['IN_PROGRESS', 'BOOKED', 'CANCELLATION_REQUESTED', 'COMPLETED', 'CANCELLED'].includes(req.status)
+  return (
+    <section>
+      <p className="section-label">Itinerary · {req.legs.length} booking{req.legs.length > 1 ? 's' : ''}</p>
+      <ol className="itinerary">
+        {req.legs.map((leg) => {
+          const Icon = SERVICE_ICON[leg.service]
+          const open = bookingLeg === leg.id
+          return (
+            <li key={leg.id} className={`leg ${leg.is_booked ? 'booked' : ''}`}>
+              <span className="leg-icon"><Icon size={16} /></span>
+              <div className="leg-main">
+                <div className="leg-title">
+                  <strong>{legRoute(leg)}</strong>
+                  {leg.is_return && <Badge tone="indigo"><Undo2 size={11} /> Return</Badge>}
+                </div>
+                <p className="subtle xs">{leg.service_label} · {legDates(leg)}{leg.notes && ` · ${leg.notes}`}</p>
+
+                {leg.is_booked && (
+                  <div className="leg-booking">
+                    <Badge tone="green">Booked</Badge>
+                    <span className="mono">{leg.booking_reference}</span>
+                    <span className="subtle xs">{formatMoney(leg.actual_cost)}</span>
+                    {leg.has_ticket && (
+                      <a className="link-btn" href={`/api/requests/${req.id}/legs/${leg.id}/ticket/`}><Download size={13} /> Ticket</a>
+                    )}
+                  </div>
+                )}
+                {!leg.is_booked && showBookingState && <p className="leg-booking"><Badge tone="amber">Not booked yet</Badge></p>}
+
+                {canBook && !open && (
+                  <button className="chip-btn leg-book-btn" onClick={() => onStartBooking(leg)}>
+                    <Upload size={13} /> {leg.is_booked ? 'Replace ticket' : 'Upload ticket'}
+                  </button>
+                )}
+                {open && (
+                  <div className="leg-booking-form">
+                    <BookingFields booking={booking} setBooking={setBooking} />
+                    <Alert>{error}</Alert>
+                    <div className="action-row end">
+                      <Button onClick={onCancelBooking} disabled={busy}>Cancel</Button>
+                      <Button kind="primary" loading={busy} onClick={() => onSaveBooking(leg)}>Save booking</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ol>
+    </section>
+  )
+}
+
+function BookingFields({ booking, setBooking }) {
   const [dragging, setDragging] = useState(false)
   const set = (field, value) => setBooking({ ...booking, [field]: value })
   const ticket = booking.ticket
-  const overBudget = estimate && booking.actual_cost && Number(booking.actual_cost) > Number(estimate) * 1.2
 
   return (
     <div className="booking-fields">
@@ -214,13 +309,8 @@ function BookingFields({ booking, setBooking, estimate }) {
           <input autoFocus value={booking.booking_reference} placeholder="e.g. 6E-PNR7XK"
                  onChange={(e) => set('booking_reference', e.target.value)} />
         </Field>
-        <Field label="Actual cost (₹)">
+        <Field label="Cost of this booking (₹)">
           <input type="number" min="0" step="0.01" value={booking.actual_cost} onChange={(e) => set('actual_cost', e.target.value)} />
-          {estimate && (
-            <small className={overBudget ? 'warn-text' : 'subtle'}>
-              Estimate {formatMoney(estimate)}{overBudget && ' · 20%+ over, the manager will be told'}
-            </small>
-          )}
         </Field>
       </div>
 
@@ -245,30 +335,12 @@ function BookingFields({ booking, setBooking, estimate }) {
   )
 }
 
-function TicketCard({ req }) {
-  return (
-    <section className="ticket-card">
-      <div>
-        <p className="section-label">Booking confirmed</p>
-        <p className="ticket-ref">{req.booking_reference}</p>
-        <p className="subtle">Paid {formatMoney(req.actual_cost)}{req.desk_agent_name && ` · booked by ${req.desk_agent_name}`}</p>
-      </div>
-      <a className="btn btn-secondary" href={`/api/requests/${req.id}/ticket/`}><Download size={16} /> Ticket</a>
-    </section>
-  )
-}
-
 function TripDetails({ req }) {
-  const ServiceIcon = SERVICE_ICON[req.service]
-  const isHotel = req.service === 'HOTEL'
   const rows = [
-    ['Traveller', req.employee_name],
+    ['Travel dates', <>{dateRange(req)} <span className="subtle">· {tripLength(req)}</span></>],
     ['Approver', req.approver_name || '—'],
-    ['Service', <span className="inline-icon"><ServiceIcon size={14} /> {req.service_label}</span>],
-    ['Dates', <>{dateRange(req)}{tripLength(req) && <span className="subtle"> · {tripLength(req)}</span>}</>],
-    !isHotel && ['From', req.origin],
-    [isHotel ? 'City' : 'To', req.destination],
     ['Estimated cost', formatMoney(req.estimated_cost)],
+    ['Actual cost', formatMoney(req.total_actual_cost)],
     ['Desk agent', req.desk_agent_name || '—'],
     ['Business purpose', req.purpose, true],
     req.preferences && ['Preferences', req.preferences, true],
