@@ -5,7 +5,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from django.http import FileResponse, Http404
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -16,7 +16,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from . import security, services
-from .models import SecurityEvent, TravelRequest, TripLeg
+from .models import RequestEvent, SecurityEvent, TravelRequest, TripLeg
 from .serializers import TravelRequestListSerializer, TravelRequestSerializer
 
 User = get_user_model()
@@ -33,13 +33,19 @@ def scoped_queryset(user, scope):
         return qs.filter(employee=user)
     if scope == 'approvals':
         return qs.filter(approver=user).exclude(employee=user)
-    if scope == 'desk':
+    if scope == 'desk':  # trips assigned to me (agents see nothing else)
         if not services.is_desk(user):
             raise PermissionDenied('Only the Travel Desk can see the desk queue.')
+        return qs.filter(desk_agent=user, status__in=DESK_STATUSES)
+    if scope == 'manage':  # every approved trip: assign, reassign, follow up
+        if not services.is_travel_manager(user):
+            raise PermissionDenied('Only Travel Managers can see this.')
         return qs.filter(status__in=DESK_STATUSES)
     visible = Q(employee=user) | Q(approver=user)
-    if services.is_desk(user):
+    if services.is_travel_manager(user):
         visible |= Q(status__in=DESK_STATUSES)
+    elif services.is_desk(user):
+        visible |= Q(desk_agent=user, status__in=DESK_STATUSES)
     return qs.filter(visible)
 
 
@@ -51,7 +57,8 @@ def overdue_q():
 # ---------------------------------------------------------------- auth
 def user_payload(user, request):
     profile = services.profile_of(user)
-    desk = profile.role == profile.Role.DESK
+    desk = services.is_desk(user)
+    travel_manager = services.is_travel_manager(user)
     return {
         'id': user.pk,
         'username': user.username,
@@ -61,6 +68,7 @@ def user_payload(user, request):
         'manager_name': services.display_name(profile.manager) if profile.manager else '',
         'is_approver': services.is_approver(user),
         'is_desk': desk,
+        'is_travel_manager': travel_manager,
         'is_superuser': user.is_superuser,
         'email': user.email,
         'designation': profile.designation,
@@ -68,14 +76,18 @@ def user_payload(user, request):
         'employee_id': profile.employee_id,
         # Temporary password (new account / admin reset): the app shows only the change-password screen.
         'must_change_password': profile.must_change_password,
+        # Travel profile not filled in yet: the app shows only the profile form.
+        'profile_complete': profile.profile_completed_at is not None,
         # Set at sign-in: the password doesn't meet the policy -> UI nags to change it.
         'password_weak': bool(request.session.get('weak_password')),
         'session_minutes': settings.SESSION_COOKIE_AGE // 60,
         'counts': {
             'pending_approvals': TravelRequest.objects.filter(
                 approver=user, status=S.PENDING_APPROVAL).exclude(employee=user).count(),
+            # Waiting on me: trips assigned to me (to book, or a cancellation to handle)
             'desk_queue': TravelRequest.objects.filter(
-                status__in=[S.APPROVED, S.CANCELLATION_REQUESTED]).count() if desk else 0,
+                desk_agent=user, status__in=[S.IN_PROGRESS, S.CANCELLATION_REQUESTED]).count() if desk else 0,
+            'to_assign': TravelRequest.objects.filter(status=S.APPROVED).count() if travel_manager else 0,
         },
     }
 
@@ -324,3 +336,71 @@ def notifications(request):
 def notifications_read(request):
     request.user.notifications.filter(is_read=False).update(is_read=True)
     return Response(status=204)
+
+
+# ---------------------------------------------------------------- Travel Manager
+def _require_travel_manager(user):
+    if not (services.is_travel_manager(user) or user.is_superuser):
+        raise PermissionDenied('Only Travel Managers can see this.')
+
+
+@api_view(['GET'])
+def desk_agents(request):
+    """People a trip can be assigned to, with how much they are booking right now."""
+    _require_travel_manager(request.user)
+    agents = services.bookers().select_related('profile').annotate(open_trips=Count(
+        'desk_assignments', filter=Q(desk_assignments__status__in=[S.IN_PROGRESS, S.CANCELLATION_REQUESTED])))
+    return Response([{'id': a.pk, 'name': services.display_name(a), 'role_label': a.profile.get_role_display(),
+                      'open_trips': a.open_trips}
+                     for a in sorted(agents, key=lambda a: (a.open_trips, services.display_name(a)))])
+
+
+@api_view(['GET'])
+def desk_analytics(request):
+    """Numbers for the Travel Manager: queue, this month's bookings and spend, speed, and agent workload."""
+    _require_travel_manager(request.user)
+    now = timezone.now()
+    month_start = timezone.localtime(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_30 = now - timedelta(days=30)
+
+    by_status = dict(TravelRequest.objects.filter(status__in=DESK_STATUSES).order_by()
+                     .values_list('status').annotate(n=Count('id')))
+    oldest_waiting = TravelRequest.objects.filter(status=S.APPROVED).order_by('updated_at').first()
+
+    booked_this_month = RequestEvent.objects.filter(action='book', created_at__gte=month_start)
+    spend = TripLeg.objects.filter(booked_at__gte=month_start).aggregate(total=Sum('actual_cost'))['total'] or 0
+    trip_types = dict(TravelRequest.objects.filter(pk__in=booked_this_month.values('request_id')).order_by()
+                      .values_list('trip_type').annotate(n=Count('id')))
+
+    # Approval -> fully booked, for trips booked in the last 30 days
+    booked = dict(RequestEvent.objects.filter(action='book', created_at__gte=last_30)
+                  .values_list('request_id', 'created_at'))
+    approved = dict(RequestEvent.objects.filter(action='approve', request_id__in=booked)
+                    .order_by('created_at').values_list('request_id', 'created_at'))
+    hours = [(booked[r] - approved[r]).total_seconds() / 3600 for r in booked if r in approved]
+
+    done_30 = dict(RequestEvent.objects.filter(action='book', created_at__gte=last_30).order_by()
+                   .values_list('actor').annotate(n=Count('id')))
+    agents = services.bookers().select_related('profile').annotate(
+        in_progress=Count('desk_assignments', filter=Q(desk_assignments__status=S.IN_PROGRESS)),
+        cancellations=Count('desk_assignments', filter=Q(desk_assignments__status=S.CANCELLATION_REQUESTED)),
+    )
+    return Response({
+        'waiting_assignment': by_status.get(S.APPROVED, 0),
+        'in_progress': by_status.get(S.IN_PROGRESS, 0),
+        'cancellation_requests': by_status.get(S.CANCELLATION_REQUESTED, 0),
+        'booked_upcoming': by_status.get(S.BOOKED, 0),
+        'oldest_waiting_hours': round((now - oldest_waiting.updated_at).total_seconds() / 3600)
+        if oldest_waiting else None,
+        'month': {
+            'trips_booked': booked_this_month.count(),
+            'spend': spend,
+            'domestic': trip_types.get(TravelRequest.TripType.DOMESTIC, 0),
+            'international': trip_types.get(TravelRequest.TripType.INTERNATIONAL, 0),
+        },
+        'avg_hours_to_book': round(sum(hours) / len(hours), 1) if hours else None,
+        'agents': sorted([{'id': a.pk, 'name': services.display_name(a), 'role_label': a.profile.get_role_display(),
+                           'in_progress': a.in_progress, 'cancellations': a.cancellations,
+                           'booked_30d': done_30.get(a.pk, 0)} for a in agents],
+                         key=lambda a: (-a['in_progress'], a['name'])),
+    })

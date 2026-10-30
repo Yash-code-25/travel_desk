@@ -8,6 +8,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from .models import SecurityEvent
+from .test_profiles import mark_profiles_complete
 
 User = get_user_model()
 DEMO_PASSWORD = 'demo1234'
@@ -20,6 +21,7 @@ class SecurityTests(TestCase):
         with open(os.devnull, 'w') as devnull:
             call_command('seed_demo', force=True, stdout=devnull)
         cls.admin = User.objects.create_superuser('root', 'root@example.com', STRONG)
+        mark_profiles_complete()
 
     def setUp(self):
         cache.clear()  # lockouts and rate limits live in the cache

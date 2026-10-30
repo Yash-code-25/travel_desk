@@ -45,9 +45,11 @@ export function tripLength(r) {
   return `${days + 1} days`
 }
 
-/** One leg: "Pune → Mumbai" or "Hotel in Delhi". */
+/** One leg: "Pune → Mumbai" or "Hotel in Delhi". Abroad the country is added: "Hotel in Dubai, United Arab Emirates". */
 export function legRoute(leg) {
-  return leg.service === 'HOTEL' ? `Hotel in ${leg.destination}` : `${leg.origin} → ${leg.destination}`
+  const where = (city, country) => (country && country !== 'India' ? `${city}, ${country}` : city)
+  const to = where(leg.destination, leg.destination_country)
+  return leg.service === 'HOTEL' ? `Hotel in ${to}` : `${where(leg.origin, leg.origin_country)} → ${to}`
 }
 
 /** One leg's date: "12 Nov" or, for hotels, "12 Nov – 14 Nov · 2 nights". */

@@ -15,6 +15,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import Notification, SecurityEvent, TravelRequest
+from .test_profiles import mark_profiles_complete
 
 User = get_user_model()
 S = TravelRequest.Status
@@ -36,6 +37,7 @@ class WorkflowTests(TestCase):
     def setUpTestData(cls):
         with open(os.devnull, 'w') as devnull:
             call_command('seed_demo', force=True, stdout=devnull)
+        mark_profiles_complete()
 
     @classmethod
     def tearDownClass(cls):
@@ -80,6 +82,10 @@ class WorkflowTests(TestCase):
     def act(self, username, pk, action, **extra):
         return self.as_user(username).post(f'/api/requests/{pk}/act/', {'action': action, **extra})
 
+    def assign(self, pk, agent='deepak', manager='anil'):
+        """The Travel Manager hands an approved trip to an agent."""
+        return self.act(manager, pk, 'assign', agent=User.objects.get(username=agent).pk)
+
     def leg_ids(self, pk):
         return list(TravelRequest.objects.get(pk=pk).legs.values_list('pk', flat=True))
 
@@ -101,7 +107,7 @@ class WorkflowTests(TestCase):
     def booked_request(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         self.book_all(pk)
         return pk
 
@@ -111,7 +117,7 @@ class WorkflowTests(TestCase):
         req = TravelRequest.objects.get(pk=pk)
         self.assertEqual(req.status, S.BOOKED)
         self.assertTrue(req.request_code.startswith('TR-'))
-        self.assertEqual([e.action for e in req.events.all()], ['submit', 'approve', 'pick_up', 'book_leg', 'book'])
+        self.assertEqual([e.action for e in req.events.all()], ['submit', 'approve', 'assign', 'book_leg', 'book'])
         self.assertTrue(Notification.objects.filter(user__username='asha', message__contains='fully booked').exists())
         for leg_id in self.leg_ids(pk):
             self.assertEqual(self.as_user('asha').get(f'/api/requests/{pk}/legs/{leg_id}/ticket/').status_code, 200)
@@ -121,25 +127,14 @@ class WorkflowTests(TestCase):
         res = self.post()
         self.assertEqual((res.data['traveller_name'], res.data['employee_name']), ('Asha Patil', 'Asha Patil'))
 
-    def test_booking_for_someone_else(self):
-        c = self.as_user('asha')
-        missing = c.post('/api/requests/', self.trip(traveller_is_requester=False), format='json')
-        self.assertIn('traveller_name', missing.data)
-        bad_phone = c.post('/api/requests/', self.trip(traveller_is_requester=False, traveller_name='Rahul Guest',
-                                                       traveller_phone='call me'), format='json')
-        self.assertIn('traveller_phone', bad_phone.data)
+    def test_cannot_request_for_someone_else(self):
+        # Colleagues raise their own requests (their own profile, passport and visas are used)
+        res = self.post(traveller_is_requester=False, traveller_name='Rahul Guest')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('traveller_is_requester', res.data)
 
-        res = c.post('/api/requests/', self.trip(traveller_is_requester=False, traveller_name='Rahul Guest',
-                                                 traveller_phone='+91 98765 43210'), format='json')
-        self.assertEqual(res.status_code, 201, res.data)
-        # The approver sees who travels AND who asked for it
-        row = self.as_user('meera').get('/api/requests/?scope=approvals&q=Rahul').data['results'][0]
-        self.assertEqual((row['traveller_name'], row['employee_name']), ('Rahul Guest', 'Asha Patil'))
-        self.assertTrue(Notification.objects.filter(user__username='meera', message__contains='for Rahul Guest').exists())
-
-    def test_same_dates_ok_for_different_travellers(self):
+    def test_same_dates_twice_is_a_duplicate(self):
         self.create()
-        self.create(traveller_is_requester=False, traveller_name='Rahul Guest')
         dup = self.post()  # Asha again, same dates
         self.assertIn('non_field_errors', dup.data)
 
@@ -288,28 +283,59 @@ class WorkflowTests(TestCase):
         self.assertEqual(self.as_user('ravi').get('/api/requests/').data['count'], 0)
         self.assertEqual(self.as_user('ravi').get(f'/api/requests/{pk}/legs/{leg_id}/ticket/').status_code, 404)
 
-    def test_desk_queue_only_for_desk(self):
+    def test_approved_trip_goes_to_travel_manager_first(self):
         self.assertEqual(self.as_user('asha').get('/api/requests/?scope=desk').status_code, 403)
+        self.assertEqual(self.as_user('deepak').get('/api/requests/?scope=manage').status_code, 403)
         pk = self.create()
-        self.assertEqual(self.as_user('deepak').get('/api/requests/?scope=desk').data['count'], 0)  # not approved
         self.act('meera', pk, 'approve')
+        # Agents see only what is assigned to them; the Travel Manager sees every approved trip
+        self.assertEqual(self.as_user('deepak').get('/api/requests/?scope=desk').data['count'], 0)
+        self.assertEqual(self.as_user('deepak').get(f'/api/requests/{pk}/').status_code, 404)
+        self.assertEqual(self.as_user('anil').get('/api/requests/?scope=manage').data['count'], 1)
+        self.assertTrue(Notification.objects.filter(user__username='anil', message__contains='waiting to be assigned').exists())
+        self.assertEqual(self.assign(pk).status_code, 200)
         self.assertEqual(self.as_user('deepak').get('/api/requests/?scope=desk').data['count'], 1)
+        self.assertEqual(self.as_user('sara').get('/api/requests/?scope=desk').data['count'], 0)
+        # The agent and the employee are told
+        self.assertTrue(Notification.objects.filter(user__username='deepak', message__contains='assigned').exists())
+        self.assertTrue(Notification.objects.filter(user__username='asha', message__contains='Deepak Nair').exists())
 
     # ------------------------------------------------------------ travel desk
-    def test_two_agents_cannot_pick_same_request(self):
+    def test_only_travel_manager_assigns(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.assertEqual(self.act('deepak', pk, 'pick_up').status_code, 200)
-        self.assertEqual(self.act('sara', pk, 'pick_up').status_code, 409)
-        self.assertEqual(self.book(pk, self.leg_ids(pk)[0], agent='sara').status_code, 403)
+        self.assertEqual(self.act('deepak', pk, 'pick_up').status_code, 404)  # agents don't even see unassigned trips
+        self.assertEqual(self.assign(pk, manager='deepak').status_code, 404)
+        self.assertIn('agent', self.act('anil', pk, 'assign', agent=User.objects.get(username='asha').pk).data)
+        self.assertEqual(self.assign(pk).status_code, 200)
+        self.assertEqual(self.book(pk, self.leg_ids(pk)[0], agent='sara').status_code, 404)  # not hers: can't see it
 
-    def test_release_puts_back_in_queue(self):
+    def test_travel_manager_reassigns_and_unassigns(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
-        self.assertEqual(self.act('deepak', pk, 'release').status_code, 200)
-        self.assertEqual(self.status_of(pk), S.APPROVED)
-        self.assertEqual(self.act('sara', pk, 'pick_up').status_code, 200)
+        self.assign(pk)
+        self.assertEqual(self.act('deepak', pk, 'release').status_code, 403)  # agents can't hand it back
+        self.assertEqual(self.assign(pk, agent='sara').status_code, 200)
+        self.assertEqual(TravelRequest.objects.get(pk=pk).desk_agent.username, 'sara')
+        self.assertTrue(Notification.objects.filter(user__username='deepak', message__contains='reassigned').exists())
+        self.assertEqual(self.act('anil', pk, 'release').status_code, 200)
+        self.assertEqual((self.status_of(pk), TravelRequest.objects.get(pk=pk).desk_agent), (S.APPROVED, None))
+        # ...or books it personally
+        self.assertEqual(self.act('anil', pk, 'pick_up').status_code, 200)
+        self.assertEqual(self.book(pk, self.leg_ids(pk)[0], agent='anil').status_code, 200)
+
+    def test_travel_manager_analytics(self):
+        self.assertEqual(self.as_user('deepak').get('/api/desk/analytics/').status_code, 403)
+        self.booked_request()
+        waiting = self.create(start_date=day(20), end_date=day(22))
+        self.act('meera', waiting, 'approve')
+        data = self.as_user('anil').get('/api/desk/analytics/').data
+        self.assertEqual((data['waiting_assignment'], data['month']['trips_booked']), (1, 1))
+        self.assertEqual(data['month']['spend'], 10000)  # 2 legs x 5000
+        deepak = next(a for a in data['agents'] if a['name'] == 'Deepak Nair')
+        self.assertEqual(deepak['booked_30d'], 1)
+        agents = self.as_user('anil').get('/api/desk/agents/').data
+        self.assertTrue({'Deepak Nair', 'Sara Khan', 'Anil Mehta'} <= {a['name'] for a in agents})
 
     def test_employee_cannot_do_desk_work(self):
         pk = self.create()
@@ -319,7 +345,7 @@ class WorkflowTests(TestCase):
     def test_each_leg_booked_separately(self):
         pk = self.create()  # outbound + return = 2 legs
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         first, second = self.leg_ids(pk)
 
         self.assertEqual(self.book(pk, first, booking_reference='OUT-1').status_code, 200)
@@ -342,7 +368,7 @@ class WorkflowTests(TestCase):
     def test_booking_validation(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         leg_id = self.leg_ids(pk)[0]
         res = self.act('deepak', pk, 'book_leg', leg=leg_id)
         self.assertEqual(set(res.data), {'booking_reference', 'actual_cost', 'ticket'})
@@ -355,7 +381,7 @@ class WorkflowTests(TestCase):
     def test_unavailable_returns_to_employee_and_needs_reapproval(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         self.assertEqual(self.act('deepak', pk, 'unavailable').status_code, 400)  # reason needed
         self.assertEqual(self.act('deepak', pk, 'unavailable', comment='Flights full').status_code, 200)
         self.assertEqual(self.status_of(pk), S.RETURNED)
@@ -366,7 +392,7 @@ class WorkflowTests(TestCase):
     def test_cost_overrun_alerts_approver(self):
         pk = self.create(estimated_cost='1000')
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         for leg_id in self.leg_ids(pk):
             self.book(pk, leg_id, actual_cost='750')  # 2 x 750 = 1500 vs 1000 estimate
         self.assertTrue(Notification.objects.filter(user__username='meera', message__contains='above the estimate').exists())
@@ -387,7 +413,9 @@ class WorkflowTests(TestCase):
         self.assertEqual(self.act('deepak', pk, 'decline_cancel', comment='Non-refundable').status_code, 200)
         self.assertEqual(self.status_of(pk), S.BOOKED)
         self.act('asha', pk, 'request_cancel', comment='Please try again')
-        self.assertEqual(self.act('sara', pk, 'confirm_cancel').status_code, 200)
+        self.assertEqual(self.act('sara', pk, 'confirm_cancel').status_code, 404)  # not her booking
+        self.assertEqual(self.act('anil', pk, 'confirm_cancel').status_code, 403)  # the agent who booked handles it
+        self.assertEqual(self.act('deepak', pk, 'confirm_cancel').status_code, 200)
         self.assertEqual(self.status_of(pk), S.CANCELLED)
 
     # ------------------------------------------------------------ time rules
@@ -457,7 +485,7 @@ class WorkflowTests(TestCase):
     def test_fake_ticket_file_rejected_and_logged(self):
         pk = self.create()
         self.act('meera', pk, 'approve')
-        self.act('deepak', pk, 'pick_up')
+        self.assign(pk)
         fake = SimpleUploadedFile('ticket.pdf', b'MZ\x90\x00 this is really an exe')
         res = self.book(pk, self.leg_ids(pk)[0], ticket=fake)
         self.assertEqual(res.status_code, 400)

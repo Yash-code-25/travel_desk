@@ -1,6 +1,6 @@
 import {
   Briefcase, Car, CircleCheck, Clock, Hotel, Hourglass, Inbox, Layers, LoaderCircle,
-  PenLine, Plane, ShieldCheck, Ticket, TrainFront, TriangleAlert, Ban, Users,
+  PenLine, Plane, ShieldCheck, Ticket, TrainFront, TriangleAlert, Ban, Users, Gauge,
 } from 'lucide-react'
 
 export const SERVICES = [
@@ -16,7 +16,7 @@ export const STATUS = {
   PENDING_APPROVAL: { label: 'Pending approval', tone: 'amber' },
   RETURNED: { label: 'Changes requested', tone: 'orange' },
   REJECTED: { label: 'Rejected', tone: 'red' },
-  APPROVED: { label: 'In desk queue', tone: 'indigo' },
+  APPROVED: { label: 'Waiting to be assigned', tone: 'indigo' },
   IN_PROGRESS: { label: 'Booking in progress', tone: 'blue' },
   BOOKED: { label: 'Booked', tone: 'green' },
   CANCELLATION_REQUESTED: { label: 'Cancellation requested', tone: 'pink' },
@@ -33,6 +33,7 @@ export const PAGES = {
     icon: Briefcase,
     defaultCard: 'all',
     empty: 'You have no travel requests yet.',
+    emptyText: 'Raise a request and follow it from approval to ticket.',
     cards: [
       { key: 'all', label: 'All requests', icon: Layers, tone: 'slate' },
       { key: 'pending', label: 'Awaiting approval', statuses: ['PENDING_APPROVAL'], icon: Clock, tone: 'amber' },
@@ -47,6 +48,7 @@ export const PAGES = {
     icon: CircleCheck,
     defaultCard: 'waiting',
     empty: 'Nothing here. You are all caught up.',
+    emptyText: 'Requests from your team appear here when they need your decision.',
     cards: [
       { key: 'waiting', label: 'Waiting for you', statuses: ['PENDING_APPROVAL'], icon: Inbox, tone: 'amber' },
       { key: 'overdue', label: 'Overdue (48h+)', overdue: true, icon: TriangleAlert, tone: 'red' },
@@ -55,15 +57,33 @@ export const PAGES = {
       { key: 'all', label: 'All', icon: Layers, tone: 'slate' },
     ],
   },
-  desk: {
-    title: 'Travel desk',
-    subtitle: 'Book approved trips, upload tickets and handle cancellations.',
-    icon: Ticket,
-    defaultCard: 'queue',
-    empty: 'The queue is empty.',
+  // Travel Managers: every approved trip, to assign, reassign or book themselves. Plus analytics.
+  manage: {
+    title: 'Travel manager',
+    subtitle: 'Assign approved trips to the Travel Desk, follow progress and see how the desk is doing.',
+    icon: Gauge,
+    defaultCard: 'waiting',
+    empty: 'No trips are waiting to be assigned.',
+    emptyText: 'Approved trips land here first, ready for you to assign.',
+    showAgent: true,
     cards: [
-      { key: 'queue', label: 'New in queue', statuses: ['APPROVED'], icon: Inbox, tone: 'indigo' },
-      { key: 'progress', label: 'In progress', statuses: ['IN_PROGRESS'], icon: Hourglass, tone: 'blue' },
+      { key: 'waiting', label: 'Waiting to assign', statuses: ['APPROVED'], icon: Inbox, tone: 'indigo' },
+      { key: 'progress', label: 'Being booked', statuses: ['IN_PROGRESS'], icon: Hourglass, tone: 'blue' },
+      { key: 'cancel', label: 'Cancellation requests', statuses: ['CANCELLATION_REQUESTED'], icon: Ban, tone: 'pink' },
+      { key: 'booked', label: 'Booked', statuses: ['BOOKED'], icon: Ticket, tone: 'green' },
+      { key: 'all', label: 'All', icon: Layers, tone: 'slate' },
+    ],
+  },
+  // Agents (and Travel Managers' own bookings): only trips assigned to them.
+  desk: {
+    title: 'My assignments',
+    subtitle: 'Trips assigned to you: book each ticket, upload it, and handle cancellations.',
+    icon: Ticket,
+    defaultCard: 'progress',
+    empty: 'Nothing assigned to you right now.',
+    emptyText: 'Your Travel Manager assigns trips to you; they appear here to book.',
+    cards: [
+      { key: 'progress', label: 'To book', statuses: ['IN_PROGRESS'], icon: Hourglass, tone: 'blue' },
       { key: 'cancel', label: 'Cancellation requests', statuses: ['CANCELLATION_REQUESTED'], icon: Ban, tone: 'pink' },
       { key: 'booked', label: 'Booked', statuses: ['BOOKED'], icon: Ticket, tone: 'green' },
       { key: 'all', label: 'All', icon: Layers, tone: 'slate' },
@@ -99,7 +119,9 @@ export const ROLES = [
   { value: 'MANAGER', label: 'Manager', tone: 'amber',
     can: 'Everything an employee can, plus approve, return or reject requests from people who report to them.' },
   { value: 'DESK', label: 'Travel Desk', tone: 'blue',
-    can: 'Everything an employee can, plus book approved trips, upload tickets and handle cancellations.' },
+    can: 'Everything an employee can, plus book the trips assigned to them, upload tickets and handle cancellations.' },
+  { value: 'TRAVEL_MGR', label: 'Travel Manager', tone: 'teal',
+    can: 'Gets every approved trip: assigns it to a Travel Desk agent or books it, reassigns, and sees desk analytics.' },
 ]
 export const ROLE_BY_VALUE = Object.fromEntries(ROLES.map((r) => [r.value, r]))
 
@@ -108,11 +130,12 @@ export const ROLE_BY_VALUE = Object.fromEntries(ROLES.map((r) => [r.value, r]))
 export const ACTIONS = {
   edit:           { label: 'Edit & resubmit', kind: 'primary' },
   approve:        { label: 'Approve', kind: 'primary', done: 'Approved and sent to the Travel Desk' },
-  pick_up:        { label: 'Start booking', kind: 'primary', done: 'Assigned to you' },
+  assign:         { label: 'Assign to agent', kind: 'primary', picker: true },
+  pick_up:        { label: 'Book it myself', kind: 'secondary', done: 'Assigned to you' },
   resubmit:       { label: 'Resubmit as is', kind: 'secondary', done: 'Resubmitted for approval' },
   return:         { label: 'Request changes', kind: 'secondary', reason: 'What should be changed?', done: 'Sent back to the employee' },
   unavailable:    { label: 'Not available', kind: 'secondary', reason: 'What is unavailable? Suggest alternatives.', done: 'Sent back to the employee' },
-  release:        { label: 'Release to queue', kind: 'secondary', confirm: 'Put this request back in the queue so another agent can take it?', done: 'Released to the queue' },
+  release:        { label: 'Unassign', kind: 'secondary', confirm: 'Take this trip off the agent? It goes back to "Waiting to be assigned".', done: 'Unassigned' },
   decline_cancel: { label: 'Decline cancellation', kind: 'secondary', reason: 'Why can it not be cancelled?', done: 'Cancellation declined' },
   complete:       { label: 'Mark completed', kind: 'secondary', done: 'Marked as completed' },
   reject:         { label: 'Reject', kind: 'danger', reason: 'Why is this request rejected?', done: 'Request rejected' },
@@ -133,6 +156,7 @@ export const EVENT_LABELS = {
   cancel: 'cancelled the request',
   request_cancel: 'asked to cancel',
   pick_up: 'started booking',
+  assign: 'assigned the trip',
   release: 'released it to the queue',
   unavailable: 'marked it unavailable',
   book: 'finished booking the trip',
@@ -150,3 +174,47 @@ export const STEP_OF = {
   PENDING_APPROVAL: 1, RETURNED: 1, APPROVED: 2, IN_PROGRESS: 2,
   BOOKED: 3, CANCELLATION_REQUESTED: 3, COMPLETED: 5,
 }
+
+// Travel profile choices (same values as the server)
+export const GENDERS = [
+  { value: 'FEMALE', label: 'Female' }, { value: 'MALE', label: 'Male' }, { value: 'OTHER', label: 'Other' },
+]
+export const SEATS = [
+  { value: 'WINDOW', label: 'Window' }, { value: 'AISLE', label: 'Aisle' }, { value: 'ANY', label: 'No preference' },
+]
+export const MEALS = [
+  { value: 'VEG', label: 'Vegetarian' }, { value: 'NON_VEG', label: 'Non-vegetarian' }, { value: 'JAIN', label: 'Jain' },
+  { value: 'VEGAN', label: 'Vegan' }, { value: 'ANY', label: 'No preference' },
+]
+
+export const TRIP_TYPES = [
+  { value: 'DOMESTIC', label: 'Domestic', text: 'Within India: flight, train, cab, hotel' },
+  { value: 'INTERNATIONAL', label: 'International', text: 'Abroad: passport & visa taken from your profile' },
+]
+
+// Same list as the server (desk/countries.py): visas and trips must use identical country names.
+export const COUNTRIES = [
+  'Afghanistan', 'Albania', 'Algeria', 'Andorra', 'Angola', 'Antigua and Barbuda', 'Argentina', 'Armenia',
+  'Australia', 'Austria', 'Azerbaijan', 'Bahamas', 'Bahrain', 'Bangladesh', 'Barbados', 'Belarus', 'Belgium',
+  'Belize', 'Benin', 'Bhutan', 'Bolivia', 'Bosnia and Herzegovina', 'Botswana', 'Brazil', 'Brunei', 'Bulgaria',
+  'Burkina Faso', 'Burundi', 'Cambodia', 'Cameroon', 'Canada', 'Cape Verde', 'Central African Republic', 'Chad',
+  'Chile', 'China', 'Colombia', 'Comoros', 'Congo', 'Costa Rica', 'Croatia', 'Cuba', 'Cyprus', 'Czech Republic',
+  'Democratic Republic of the Congo', 'Denmark', 'Djibouti', 'Dominica', 'Dominican Republic', 'Ecuador', 'Egypt',
+  'El Salvador', 'Equatorial Guinea', 'Eritrea', 'Estonia', 'Eswatini', 'Ethiopia', 'Fiji', 'Finland', 'France',
+  'Gabon', 'Gambia', 'Georgia', 'Germany', 'Ghana', 'Greece', 'Grenada', 'Guatemala', 'Guinea', 'Guinea-Bissau',
+  'Guyana', 'Haiti', 'Honduras', 'Hong Kong', 'Hungary', 'Iceland', 'India', 'Indonesia', 'Iran', 'Iraq', 'Ireland',
+  'Israel', 'Italy', 'Ivory Coast', 'Jamaica', 'Japan', 'Jordan', 'Kazakhstan', 'Kenya', 'Kiribati', 'Kuwait',
+  'Kyrgyzstan', 'Laos', 'Latvia', 'Lebanon', 'Lesotho', 'Liberia', 'Libya', 'Liechtenstein', 'Lithuania',
+  'Luxembourg', 'Macau', 'Madagascar', 'Malawi', 'Malaysia', 'Maldives', 'Mali', 'Malta', 'Marshall Islands',
+  'Mauritania', 'Mauritius', 'Mexico', 'Micronesia', 'Moldova', 'Monaco', 'Mongolia', 'Montenegro', 'Morocco',
+  'Mozambique', 'Myanmar', 'Namibia', 'Nauru', 'Nepal', 'Netherlands', 'New Zealand', 'Nicaragua', 'Niger',
+  'Nigeria', 'North Korea', 'North Macedonia', 'Norway', 'Oman', 'Pakistan', 'Palau', 'Palestine', 'Panama',
+  'Papua New Guinea', 'Paraguay', 'Peru', 'Philippines', 'Poland', 'Portugal', 'Qatar', 'Romania', 'Russia',
+  'Rwanda', 'Saint Kitts and Nevis', 'Saint Lucia', 'Saint Vincent and the Grenadines', 'Samoa', 'San Marino',
+  'Sao Tome and Principe', 'Saudi Arabia', 'Senegal', 'Serbia', 'Seychelles', 'Sierra Leone', 'Singapore',
+  'Slovakia', 'Slovenia', 'Solomon Islands', 'Somalia', 'South Africa', 'South Korea', 'South Sudan', 'Spain',
+  'Sri Lanka', 'Sudan', 'Suriname', 'Sweden', 'Switzerland', 'Syria', 'Taiwan', 'Tajikistan', 'Tanzania', 'Thailand',
+  'Timor-Leste', 'Togo', 'Tonga', 'Trinidad and Tobago', 'Tunisia', 'Turkey', 'Turkmenistan', 'Tuvalu', 'Uganda',
+  'Ukraine', 'United Arab Emirates', 'United Kingdom', 'United States', 'Uruguay', 'Uzbekistan', 'Vanuatu',
+  'Vatican City', 'Venezuela', 'Vietnam', 'Yemen', 'Zambia', 'Zimbabwe',
+]

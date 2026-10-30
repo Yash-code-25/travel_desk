@@ -7,10 +7,13 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
-from . import services
+from . import profiles, services
+from .countries import COUNTRY_SET, INDIA
 from .models import RequestEvent, TravelRequest, TripLeg
 
 HOTEL = TravelRequest.Service.HOTEL
+TRAIN = TravelRequest.Service.TRAIN
+INTERNATIONAL = TravelRequest.TripType.INTERNATIONAL
 PHONE_RE = re.compile(r'^\+?[0-9 ()-]{7,20}$')
 
 
@@ -32,12 +35,15 @@ class LegSerializer(serializers.ModelSerializer):
     destination = serializers.CharField(max_length=100)
     end_date = serializers.DateField(required=False, allow_null=True)
     notes = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    origin_country = serializers.CharField(max_length=60, required=False, allow_blank=True)
+    destination_country = serializers.CharField(max_length=60, required=False, allow_blank=True)
     is_booked = serializers.BooleanField(read_only=True)
     has_ticket = serializers.SerializerMethodField()
 
     class Meta:
         model = TripLeg
-        fields = ['id', 'position', 'service', 'service_label', 'origin', 'destination', 'date', 'end_date',
+        fields = ['id', 'position', 'service', 'service_label', 'origin', 'origin_country', 'destination',
+                  'destination_country', 'date', 'end_date',
                   'notes', 'is_return', 'booking_reference', 'actual_cost', 'has_ticket', 'is_booked', 'booked_at']
         read_only_fields = ['id', 'position', 'booking_reference', 'actual_cost', 'booked_at']
 
@@ -48,6 +54,7 @@ class LegSerializer(serializers.ModelSerializer):
 class TravelRequestListSerializer(serializers.ModelSerializer):
     """Small payload for tables: no history, no long text."""
     employee_name = serializers.SerializerMethodField()
+    desk_agent_name = serializers.SerializerMethodField()
     status_label = serializers.CharField(source='get_status_display', read_only=True)
     route_summary = serializers.CharField(read_only=True)
     services = serializers.ListField(read_only=True)
@@ -59,7 +66,7 @@ class TravelRequestListSerializer(serializers.ModelSerializer):
     class Meta:
         model = TravelRequest
         fields = [
-            'id', 'request_code', 'status', 'status_label', 'employee_name',
+            'id', 'request_code', 'status', 'status_label', 'trip_type', 'employee_name', 'desk_agent_name',
             'traveller_name', 'traveller_is_requester', 'route_summary', 'services',
             'legs_count', 'legs_booked', 'start_date', 'end_date',
             'is_overdue', 'needs_action', 'created_at', 'updated_at',
@@ -67,6 +74,9 @@ class TravelRequestListSerializer(serializers.ModelSerializer):
 
     def get_employee_name(self, obj):
         return services.display_name(obj.employee)
+
+    def get_desk_agent_name(self, obj):
+        return services.display_name(obj.desk_agent) if obj.desk_agent else ''
 
     def get_legs_count(self, obj):
         return len(obj.legs.all())
@@ -81,11 +91,16 @@ class TravelRequestListSerializer(serializers.ModelSerializer):
 class TravelRequestSerializer(serializers.ModelSerializer):
     """Full detail: traveller, itinerary (legs), history and allowed actions. Also used for create/edit."""
     employee_name = serializers.SerializerMethodField()
+    requester_id = serializers.IntegerField(source='employee_id', read_only=True)  # Travel Desk opens their profile
     approver_name = serializers.SerializerMethodField()
     desk_agent_name = serializers.SerializerMethodField()
     status_label = serializers.CharField(source='get_status_display', read_only=True)
+    trip_type_label = serializers.CharField(source='get_trip_type_display', read_only=True)
     route_summary = serializers.CharField(read_only=True)
     services = serializers.ListField(read_only=True)
+    traveller_snapshot = serializers.JSONField(read_only=True)
+    # International, no forex card in the profile: "please arrange forex for me".
+    forex_needed = serializers.BooleanField(required=False, default=False, write_only=True)
     total_actual_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
     allowed_actions = serializers.SerializerMethodField()
@@ -104,9 +119,9 @@ class TravelRequestSerializer(serializers.ModelSerializer):
         model = TravelRequest
         fields = [
             'id', 'request_code', 'status', 'status_label',
-            'employee_name', 'approver_name', 'desk_agent_name',
+            'requester_id', 'employee_name', 'approver_name', 'desk_agent_name',
             'traveller_is_requester', 'traveller_name', 'traveller_phone', 'traveller_email',
-            'legs', 'route_summary', 'services', 'start_date', 'end_date',
+            'trip_type', 'trip_type_label', 'traveller_snapshot', 'forex_needed', 'legs', 'route_summary', 'services', 'start_date', 'end_date',
             'purpose', 'preferences', 'estimated_cost', 'total_actual_cost',
             'is_overdue', 'submitted_at', 'created_at', 'updated_at',
             'allowed_actions', 'events',
@@ -122,6 +137,14 @@ class TravelRequestSerializer(serializers.ModelSerializer):
     def get_desk_agent_name(self, obj):
         return services.display_name(obj.desk_agent) if obj.desk_agent else ''
 
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        viewer = self.context['request'].user
+        # Passport, visas, forex and preferences: the traveller, the Travel Desk and administrators only.
+        if not (viewer.pk == obj.employee_id or viewer.is_superuser or services.is_desk(viewer)):
+            data['traveller_snapshot'] = {}
+        return data
+
     def get_allowed_actions(self, obj):
         return services.allowed_actions(self.context['request'].user, obj)
 
@@ -135,17 +158,26 @@ class TravelRequestSerializer(serializers.ModelSerializer):
         requester = self.instance.employee if self.instance else self.context['request'].user
         self._check_traveller(data, requester)
 
+        trip_type = data.get('trip_type', self.instance.trip_type if self.instance else TravelRequest.TripType.DOMESTIC)
         legs = data.get('legs')
         if legs is None and self.instance:  # edit without touching the itinerary
             first, last = self.instance.start_date, self.instance.last_date
+            legs = [{'service': l.service, 'origin_country': l.origin_country,
+                     'destination_country': l.destination_country} for l in self.instance.legs.all()]
+            check_countries(legs, trip_type)
         else:
-            first, last = check_legs(legs or [])
+            first, last = check_legs(legs or [], trip_type)
         self._check_duplicate(requester, data.get('traveller_name') or self.instance.traveller_name, first, last)
+        data['traveller_snapshot'] = profiles.trip_snapshot(
+            requester, trip_type, legs, last, data.pop('forex_needed', False))
         return data
 
     def _check_traveller(self, data, requester):
         is_requester = data.get('traveller_is_requester',
                                 self.instance.traveller_is_requester if self.instance else True)
+        if not is_requester:
+            raise serializers.ValidationError({'traveller_is_requester': [
+                'You can only request trips for yourself. Colleagues raise their own requests.']})
         if is_requester:
             data['traveller_name'] = services.display_name(requester)
             data['traveller_email'] = requester.email
@@ -204,7 +236,33 @@ class TravelRequestSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------- itinerary rules
-def check_legs(legs):
+def check_countries(legs, trip_type):
+    """Domestic: India only, no countries asked. International: Flight / Cab / Hotel, each with its countries,
+    and at least one stop abroad. Fills in the countries (empty for domestic). Raises errors per leg."""
+    errors = [{} for _ in legs]
+    for leg, e in zip(legs, errors):
+        hotel = leg['service'] == HOTEL
+        if trip_type != INTERNATIONAL:
+            leg['origin_country'], leg['destination_country'] = '', ''
+            continue
+        if leg['service'] == TRAIN:
+            e['service'] = ['Trains are not available on international trips. Choose Flight, Cab or Hotel.']
+        for field in (['destination_country'] if hotel else ['origin_country', 'destination_country']):
+            value = (leg.get(field) or '').strip()
+            if value not in COUNTRY_SET:
+                e[field] = ['Choose the country from the list.']
+            leg[field] = value
+        if hotel:
+            leg['origin_country'] = ''
+    if any(errors):
+        raise serializers.ValidationError({'legs': errors})
+    if trip_type == INTERNATIONAL and not any(
+            leg['destination_country'] != INDIA or leg['origin_country'] not in ('', INDIA) for leg in legs):
+        raise serializers.ValidationError({'non_field_errors': [
+            'An international trip needs at least one booking outside India. Otherwise choose Domestic.']})
+
+
+def check_legs(legs, trip_type=TravelRequest.TripType.DOMESTIC):
     """Validate the itinerary. Returns (first_day, last_day) or raises errors per leg."""
     if not legs:
         raise serializers.ValidationError({'legs': ['Add at least one booking: flight, train, cab or hotel.']})
@@ -245,6 +303,7 @@ def check_legs(legs):
     if any(errors):
         raise serializers.ValidationError({'legs': errors})
 
+    check_countries(legs, trip_type)
     first, last = trip_dates(legs)
     if (last or first) - first > timedelta(days=settings.MAX_TRIP_DAYS):
         raise serializers.ValidationError({'non_field_errors': [
@@ -261,6 +320,7 @@ def trip_dates(legs):
 def save_legs(request, legs):
     TripLeg.objects.bulk_create([
         TripLeg(request=request, position=n, service=leg['service'], origin=leg.get('origin', ''),
+                origin_country=leg.get('origin_country', ''), destination_country=leg.get('destination_country', ''),
                 destination=leg['destination'], date=leg['date'], end_date=leg.get('end_date'),
                 notes=leg.get('notes', ''), is_return=leg.get('is_return', False))
         for n, leg in enumerate(legs, start=1)

@@ -1,10 +1,10 @@
 // Side panel for one travel request: status, next step, itinerary (with per-leg tickets), details and history.
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Download, FileText, TriangleAlert, Undo2, Upload, X } from 'lucide-react'
+import { Check, Download, FileText, IdCard, TriangleAlert, Undo2, Upload, X } from 'lucide-react'
 import { allErrors, api } from '../api.js'
 import { ACTIONS, EVENT_LABELS, SERVICE_ICON, STEPS, STEP_OF, sortActions } from '../constants.js'
 import { useEscape } from '../hooks.js'
-import { dateRange, formatDateTime, formatMoney, legDates, legRoute, timeAgo, tripLength } from '../utils.js'
+import { dateRange, formatDate, formatDateTime, formatMoney, legDates, legRoute, timeAgo, tripLength } from '../utils.js'
 import { useToast } from './Toast.jsx'
 import { Alert, Avatar, Badge, Banner, Button, Field, Spinner, StatusBadge } from './ui.jsx'
 
@@ -12,7 +12,7 @@ const MAX_TICKET_MB = 5
 const TICKET_TYPES = ['pdf', 'png', 'jpg', 'jpeg']
 const EMPTY_BOOKING = { booking_reference: '', actual_cost: '', ticket: null }
 
-export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEdit }) {
+export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEdit, onViewProfile }) {
   const toast = useToast()
   const [req, setReq] = useState(null)
   const [loadError, setLoadError] = useState('')
@@ -22,12 +22,13 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
   const [booking, setBooking] = useState(EMPTY_BOOKING)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false) // disables buttons, so nothing is submitted twice
+  const [agent, setAgent] = useState('') // Travel Manager: who to assign the trip to
 
   const load = useCallback(() =>
     api(`/requests/${id}/`).then((r) => { setReq(r); setLoadError('') }).catch((e) => setLoadError(e.message)), [id])
 
   function closePanels() {
-    setActive(null); setReason(''); setBookingLeg(null); setBooking(EMPTY_BOOKING); setError('')
+    setActive(null); setReason(''); setBookingLeg(null); setBooking(EMPTY_BOOKING); setError(''); setAgent('')
   }
 
   useEffect(() => { setReq(null); closePanels(); load() }, [id, load])
@@ -57,12 +58,16 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
     closePanels()
     if (action === 'edit') return onEdit(req)
     const meta = ACTIONS[action]
-    if (meta.reason || meta.confirm) return setActive(action)
+    if (meta.reason || meta.confirm || meta.picker) return setActive(action)
     send({ action, comment: '' }, () => meta.done)
   }
 
   function confirmAction() {
     const meta = ACTIONS[active]
+    if (active === 'assign') {
+      if (!agent) return setError('Choose who should book this trip.')
+      return send({ action: 'assign', agent, comment: reason }, (updated) => `Assigned to ${updated.desk_agent_name}`)
+    }
     if (meta.reason && !reason.trim()) return setError('Please add a reason. It is shared with everyone involved.')
     send({ action: active, comment: reason }, () => meta.done)
   }
@@ -86,7 +91,10 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
         <header className="drawer-head">
           {req ? (
             <div>
-              <div className="drawer-title"><h2>{req.request_code}</h2><StatusBadge status={req.status} /></div>
+              <div className="drawer-title">
+                <h2>{req.request_code}</h2><StatusBadge status={req.status} />
+                {req.trip_type === 'INTERNATIONAL' && <Badge tone="blue">International</Badge>}
+              </div>
               <p className="subtle">{req.route_summary} · created {timeAgo(req.created_at)}</p>
             </div>
           ) : <div className="subtle">{loadError || 'Loading…'}</div>}
@@ -99,13 +107,19 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
           <div className="drawer-body">
             <StatusBanner req={req} />
             <Stepper status={req.status} />
-            <TravellerCard req={req} />
+            <TravellerCard req={req} onViewProfile={onViewProfile} />
+            <TravelDocuments snap={req.traveller_snapshot} international={req.trip_type === 'INTERNATIONAL'} />
 
             {(buttons.length > 0 || canBook) && (
               <section className="action-card">
                 {active ? (
-                  <ActionPanel action={active} busy={busy} reason={reason} setReason={setReason}
-                               onBack={closePanels} onConfirm={confirmAction} />
+                  active === 'assign' ? (
+                    <AssignPanel req={req} busy={busy} agent={agent} setAgent={setAgent} note={reason} setNote={setReason}
+                                 onBack={closePanels} onConfirm={confirmAction} />
+                  ) : (
+                    <ActionPanel action={active} busy={busy} reason={reason} setReason={setReason}
+                                 onBack={closePanels} onConfirm={confirmAction} />
+                  )
                 ) : (
                   <>
                     <p className="section-label">Your next step</p>
@@ -117,11 +131,14 @@ export default function RequestDrawer({ id, refreshKey, onClose, onChanged, onEd
                     )}
                     {buttons.length > 0 && (
                       <div className="action-row">
-                        {buttons.map((a) => (
-                          <Button key={a} kind={ACTIONS[a]?.kind} loading={busy && !bookingLeg} onClick={() => start(a)}>
-                            {ACTIONS[a]?.label || a}
-                          </Button>
-                        ))}
+                        {buttons.map((a) => {
+                          const reassign = a === 'assign' && req.desk_agent_name // already with someone
+                          return (
+                            <Button key={a} kind={reassign ? 'secondary' : ACTIONS[a]?.kind} loading={busy && !bookingLeg} onClick={() => start(a)}>
+                              {reassign ? 'Reassign' : ACTIONS[a]?.label || a}
+                            </Button>
+                          )
+                        })}
                       </div>
                     )}
                   </>
@@ -201,8 +218,9 @@ function Stepper({ status }) {
   )
 }
 
-/** Who travels, and who asked for it when that's someone else. */
-function TravellerCard({ req }) {
+/** Who travels, and who asked for it when that's someone else.
+ *  The Travel Desk / administrators can open the requester's travel profile (ID, passport, preferences). */
+function TravellerCard({ req, onViewProfile }) {
   const contact = [req.traveller_phone, req.traveller_email].filter(Boolean).join(' · ')
   return (
     <section className="traveller-card">
@@ -213,11 +231,51 @@ function TravellerCard({ req }) {
         {contact && <p className="subtle xs">{contact}</p>}
       </div>
       <div className="requested-by">
-        <p className="section-label">Requested by</p>
-        <strong>{req.employee_name}</strong>
-        {req.traveller_is_requester && <p className="subtle xs">travelling themselves</p>}
+        {!req.traveller_is_requester && (  // older requests raised for a guest
+          <>
+            <p className="section-label">Requested by</p>
+            <strong>{req.employee_name}</strong>
+          </>
+        )}
+        {onViewProfile && (
+          <button className="link-btn" onClick={() => onViewProfile(req.requester_id)}>
+            <IdCard size={13} /> {req.traveller_is_requester ? 'View profile & documents' : 'Requester profile'}
+          </button>
+        )}
       </div>
     </section>
+  )
+}
+
+/** Travel Manager: pick the agent who books this trip (least busy first). */
+function AssignPanel({ req, busy, agent, setAgent, note, setNote, onBack, onConfirm }) {
+  const [agents, setAgents] = useState(null)
+  useEffect(() => { api('/desk/agents/').then(setAgents).catch(() => setAgents([])) }, [])
+  const choices = (agents || []).filter((a) => a.name !== req.desk_agent_name && a.name !== req.employee_name)
+  return (
+    <div className="confirm-panel">
+      <p className="confirm-title">{req.desk_agent_name ? `Reassign (now with ${req.desk_agent_name})` : 'Assign to a Travel Desk agent'}</p>
+      {!agents ? <Spinner /> : (
+        <div className="agent-list" role="radiogroup" aria-label="Agent">
+          {choices.map((a) => (
+            <label key={a.id} className={`agent-option ${String(agent) === String(a.id) ? 'on' : ''}`}>
+              <input type="radio" name="agent" value={a.id} checked={String(agent) === String(a.id)} onChange={() => setAgent(a.id)} />
+              <Avatar name={a.name} size={28} />
+              <span><strong>{a.name}</strong><small className="subtle xs"> · {a.role_label}</small></span>
+              <Badge tone={a.open_trips ? 'amber' : 'green'}>{a.open_trips} open</Badge>
+            </label>
+          ))}
+          {choices.length === 0 && <p className="subtle">No other active Travel Desk agents.</p>}
+        </div>
+      )}
+      <Field label="Note for the agent" optional>
+        <input value={note} maxLength={300} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Use the corporate fare, VIP client" />
+      </Field>
+      <div className="action-row end">
+        <Button onClick={onBack} disabled={busy}>Back</Button>
+        <Button kind="primary" loading={busy} onClick={onConfirm}>{req.desk_agent_name ? 'Reassign' : 'Assign'}</Button>
+      </div>
+    </div>
   )
 }
 
@@ -332,6 +390,26 @@ function BookingFields({ booking, setBooking }) {
         )}
       </label>
     </div>
+  )
+}
+
+/** Copied from the traveller's profile at submit. Empty for managers (they don't see personal documents). */
+function TravelDocuments({ snap, international }) {
+  if (!snap || !Object.keys(snap).length) return null
+  const prefs = [snap.seat && `${snap.seat} seat`, snap.meal && `${snap.meal} meal`, ...(snap.frequent_flyers || [])].filter(Boolean)
+  if (!international && !prefs.length) return null
+  return (
+    <section className="docs-summary">
+      <p className="section-label"><IdCard size={14} /> {international ? 'Travel documents' : 'Traveller preferences'}</p>
+      <ul className="plain-list">
+        {snap.passport && <li>Passport <strong>{snap.passport.number}</strong> ({snap.passport.place_of_issue}), valid until {formatDate(snap.passport.expiry_date)}</li>}
+        {snap.visas?.map((v) => <li key={v.country}>Visa for {v.country}: {v.visa_type}, valid until {formatDate(v.expiry_date)}</li>)}
+        {snap.visa_needed?.map((c) => <li key={c}><Badge tone="amber">Visa needed</Badge> {c}: no valid visa in the profile</li>)}
+        {international && <li>Forex: {snap.forex ? `${snap.forex.bank}, card ending ${snap.forex.card_last4}`
+          : snap.forex_needed ? <><Badge tone="amber">Arrange forex</Badge> traveller has no forex card</> : 'not needed'}</li>}
+        {prefs.length > 0 && <li>Preferences: {prefs.join(' · ')}</li>}
+      </ul>
+    </section>
   )
 }
 

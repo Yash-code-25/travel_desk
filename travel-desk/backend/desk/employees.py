@@ -92,13 +92,14 @@ def _event(req, actor, action, old_status, comment):
 
 
 def release_desk_work(agent, actor, why):
-    """Requests this desk agent was booking go back to the desk queue."""
+    """Requests this desk agent was booking go back to the Travel Managers, to be assigned again."""
     moved = 0
     for req in TravelRequest.objects.select_for_update().filter(desk_agent=agent, status=S.IN_PROGRESS):
         req.status, req.desk_agent = S.APPROVED, None
         req.save(update_fields=['status', 'desk_agent', 'updated_at'])
         _event(req, actor, 'release', S.IN_PROGRESS, why)
-        services.notify(services.desk_team(), req, f'{req.request_code} is back in the desk queue: {why}', actor)
+        services.notify(services.travel_managers(), req,
+                        f'{req.request_code} needs to be assigned again: {why}', actor)
         moved += 1
     return moved
 
@@ -155,7 +156,7 @@ def apply_access_changes(user, actor, *, old_role, old_manager, deactivated):
         n = release_desk_work(user, actor, f'{services.display_name(user)} was deactivated')
         if n:
             notes.append(f'{n} booking(s) returned to the desk queue')
-    elif old_role == Profile.Role.DESK and profile.role != Profile.Role.DESK:
+    elif old_role in services.DESK_ROLES and profile.role not in services.DESK_ROLES:
         n = release_desk_work(user, actor, f'{services.display_name(user)} is no longer on the Travel Desk')
         if n:
             notes.append(f'{n} booking(s) returned to the desk queue')

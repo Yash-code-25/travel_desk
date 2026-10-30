@@ -5,6 +5,7 @@ import { api } from '../api.js'
 import { PAGES, SERVICE_ICON } from '../constants.js'
 import { useDebounced, usePagedList } from '../hooks.js'
 import { dateRange, timeAgo, tripLength } from '../utils.js'
+import DeskAnalytics from './DeskAnalytics.jsx'
 import { Alert, Avatar, Badge, Button, EmptyState, FilterTabs, Pager, SearchBox, StatusBadge } from './ui.jsx'
 
 const SORTS = [
@@ -43,6 +44,7 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
 
   return (
     <div className="page">
+      {scope === 'manage' && <DeskAnalytics refreshKey={refreshKey} />}
       <FilterTabs label="Show" value={cardKey} onChange={setCardKey}
                   items={config.cards.map((c) => ({ key: c.key, label: c.label, count: countFor(c), alert: c.overdue }))} />
 
@@ -69,13 +71,13 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
                 <th>Itinerary</th>
                 <th>Travel dates</th>
                 <th>Status</th>
-                <th className="right">Updated</th>
+                <th className="right c-updated">Updated</th>
               </tr>
             </thead>
             <tbody>
               {!list.result && list.loading && <SkeletonRows columns={6} />}
               {list.rows.map((r) => (
-                <RequestRow key={r.id} request={r} showTraveller={showTraveller} onOpen={onOpen} />
+                <RequestRow key={r.id} request={r} showTraveller={showTraveller} showAgent={config.showAgent} onOpen={onOpen} />
               ))}
             </tbody>
           </table>
@@ -84,7 +86,8 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
             <EmptyState
               icon={Inbox}
               title={q ? `No results for "${q}"` : cardKey === config.defaultCard ? config.empty : 'No requests in this view'}
-              text={q ? 'Try a different code, name or city.' : 'Try another card above to see more.'}
+              text={q ? 'Try a different code, name or city.'
+                : cardKey === config.defaultCard ? config.emptyText : 'Nothing with this status. Try another filter above.'}
               action={scope === 'mine' && !q && <Button kind="primary" icon={Plus} onClick={onNewRequest}>New request</Button>}
             />
           )}
@@ -96,7 +99,7 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
   )
 }
 
-function RequestRow({ request: r, showTraveller, onOpen }) {
+function RequestRow({ request: r, showTraveller, showAgent, onOpen }) {
   const bookingProgress = ['IN_PROGRESS', 'APPROVED'].includes(r.status) && r.legs_count > 1
   return (
     <tr tabIndex={0} onClick={() => onOpen(r.id)} onKeyDown={(e) => e.key === 'Enter' && onOpen(r.id)}>
@@ -124,7 +127,7 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
             {r.services.map((s) => { const Icon = SERVICE_ICON[s]; return <span key={s} className="trip-icon"><Icon size={14} /></span> })}
           </span>
           <div>
-            <div className="trip-route">{r.route_summary}</div>
+            <div className="trip-route">{r.route_summary}{r.trip_type === 'INTERNATIONAL' && <> <Badge tone="blue">Intl</Badge></>}</div>
             <div className="subtle xs">
               {r.legs_count} booking{r.legs_count === 1 ? '' : 's'} · {tripLength(r)}
               {bookingProgress && ` · ${r.legs_booked}/${r.legs_count} booked`}
@@ -138,8 +141,9 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
           <StatusBadge status={r.status} />
           {r.is_overdue && <Badge tone="red" solid>Overdue</Badge>}
         </div>
+        {showAgent && r.desk_agent_name && <div className="subtle xs">Agent: {r.desk_agent_name}</div>}
       </td>
-      <td className="right subtle">{timeAgo(r.updated_at)}</td>
+      <td className="right subtle c-updated">{timeAgo(r.updated_at)}</td>
     </tr>
   )
 }

@@ -20,7 +20,8 @@ class SecurityHeadersMiddleware:
 
 class PasswordChangeRequiredMiddleware:
     """Someone signed in with a temporary password (new account or admin reset) can only
-    use the /api/auth/ endpoints - i.e. change their password or sign out - until they pick their own."""
+    use the /api/auth/ endpoints - i.e. change their password or sign out - until they pick their own.
+    After that, until they fill in their travel profile, they can also use /api/profile/ and nothing else."""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -35,4 +36,8 @@ class PasswordChangeRequiredMiddleware:
                     return JsonResponse(
                         {'detail': 'Please change your temporary password first.',
                          'code': 'password_change_required'}, status=403)
+                if (profile is not None and profile.profile_completed_at is None
+                        and not path.startswith('/api/profile/')):
+                    return JsonResponse(
+                        {'detail': 'Please complete your profile first.', 'code': 'profile_required'}, status=403)
         return self.get_response(request)

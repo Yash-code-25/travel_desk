@@ -44,18 +44,23 @@ ACTIONS = {
     'cancel':         dict(src=[S.PENDING_APPROVAL, S.RETURNED, S.APPROVED, S.IN_PROGRESS],
                            dst=S.CANCELLED, who='owner'),
     'request_cancel': dict(src=[S.BOOKED], dst=S.CANCELLATION_REQUESTED, who='owner', reason=True),
-    'pick_up':        dict(src=[S.APPROVED], dst=S.IN_PROGRESS, who='desk'),
-    'release':        dict(src=[S.IN_PROGRESS], dst=S.APPROVED, who='agent'),
+    # Approved trips wait for a Travel Manager, who books them ("pick_up") or assigns an agent.
+    # Only a Travel Manager can assign, reassign or take a trip off an agent ("release").
+    'pick_up':        dict(src=[S.APPROVED], dst=S.IN_PROGRESS, who='travel_manager'),
+    'assign':         dict(src=[S.APPROVED, S.IN_PROGRESS], dst=S.IN_PROGRESS, who='travel_manager'),
+    'release':        dict(src=[S.IN_PROGRESS], dst=S.APPROVED, who='travel_manager'),
     'unavailable':    dict(src=[S.IN_PROGRESS], dst=S.RETURNED, who='agent', reason=True),
     # One leg at a time (flight / train / cab / hotel). The trip becomes BOOKED when every leg is booked.
     'book_leg':       dict(src=[S.IN_PROGRESS], dst=S.BOOKED, who='agent'),
-    'confirm_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.CANCELLED, who='desk'),
-    'decline_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.BOOKED, who='desk', reason=True),
-    'complete':       dict(src=[S.BOOKED], dst=S.COMPLETED, who='desk'),
+    # After booking, the agent who booked it handles cancellations (a Travel Manager steps in if they left).
+    'confirm_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.CANCELLED, who='booking_agent'),
+    'decline_cancel': dict(src=[S.CANCELLATION_REQUESTED], dst=S.BOOKED, who='booking_agent', reason=True),
+    'complete':       dict(src=[S.BOOKED], dst=S.COMPLETED, who='booking_agent'),
 }
 
 # These need the trip to still be in the future.
-FUTURE_ONLY_ACTIONS = {'approve', 'pick_up', 'book_leg', 'resubmit'}
+FUTURE_ONLY_ACTIONS = {'approve', 'pick_up', 'assign', 'book_leg', 'resubmit'}
+DESK_ROLES = (Profile.Role.DESK, Profile.Role.TRAVEL_MANAGER)
 
 
 # ---------------------------------------------------------------- roles
@@ -73,7 +78,12 @@ def profile_of(user):
 
 
 def is_desk(user):
-    return profile_of(user).role == Profile.Role.DESK
+    """Travel Desk staff: agents and Travel Managers (both book tickets and see traveller documents)."""
+    return profile_of(user).role in DESK_ROLES
+
+
+def is_travel_manager(user):
+    return profile_of(user).role == Profile.Role.TRAVEL_MANAGER
 
 
 def is_approver(user):
@@ -107,10 +117,14 @@ def can_act(user, req, who):
         return False
     if who == 'approver':
         return req.approver_id == user.pk
-    if who == 'desk':
-        return is_desk(user)
+    if who == 'travel_manager':
+        return is_travel_manager(user)
     if who == 'agent':
         return is_desk(user) and req.desk_agent_id == user.pk
+    if who == 'booking_agent':
+        if req.desk_agent_id and req.desk_agent.is_active:
+            return req.desk_agent_id == user.pk
+        return is_travel_manager(user)  # nobody (active) booked it: a Travel Manager handles it
     return False
 
 
@@ -133,11 +147,13 @@ def allowed_actions(user, req):
 
 # Actions that are always "available" but don't mean the user is blocking anything.
 PASSIVE_ACTIONS = {'cancel', 'request_cancel', 'release', 'complete', 'resubmit'}
+# A Travel Manager can reassign trips that are already being booked; that alone isn't "waiting on them".
+PASSIVE_FROM = {('assign', S.IN_PROGRESS)}
 
 
 def needs_attention(user, req):
     """True when this user is the one the request is waiting on (blue dot in lists)."""
-    return any(a not in PASSIVE_ACTIONS for a in allowed_actions(user, req))
+    return any(a not in PASSIVE_ACTIONS and (a, req.status) not in PASSIVE_FROM for a in allowed_actions(user, req))
 
 
 # ---------------------------------------------------------------- notifications
@@ -157,8 +173,13 @@ def notify(users, req, message, actor=None):
             f'[Travel Desk] {req.request_code}', message, None, emails, fail_silently=True))
 
 
-def desk_team():
-    return list(User.objects.filter(profile__role=Profile.Role.DESK, is_active=True))
+def travel_managers():
+    return list(User.objects.filter(profile__role=Profile.Role.TRAVEL_MANAGER, is_active=True))
+
+
+def bookers():
+    """Who a trip can be assigned to: active Travel Desk agents and Travel Managers."""
+    return User.objects.filter(profile__role__in=DESK_ROLES, is_active=True)
 
 
 def _notify_for(action, req, actor, comment, old_status):
@@ -174,7 +195,8 @@ def _notify_for(action, req, actor, comment, old_status):
                f'{who} submitted {code}{traveller} ({req.route_summary}) for your approval.', actor)
     elif action == 'approve':
         notify([emp], req, f'{code} was approved by {who} and sent to the Travel Desk.', actor)
-        notify(desk_team(), req, f'{code} ({req.traveller_name}: {req.route_summary}) is waiting in the desk queue.', actor)
+        notify(travel_managers(), req, f'{code} ({req.traveller_name}: {req.route_summary}) is approved and '
+                                       'waiting to be assigned.', actor)
     elif action == 'return':
         notify([emp], req, f'{who} returned {code} for changes.{reason}', actor)
     elif action == 'reject':
@@ -182,15 +204,22 @@ def _notify_for(action, req, actor, comment, old_status):
     elif action == 'cancel':
         targets = [req.approver] if old_status == S.PENDING_APPROVAL else []
         targets += [req.desk_agent] if old_status == S.IN_PROGRESS else []
-        targets += desk_team() if old_status == S.APPROVED else []
+        targets += travel_managers() if old_status == S.APPROVED else []
         notify(targets, req, f'{who} cancelled {code}.', actor)
     elif action == 'request_cancel':
-        notify([req.desk_agent] if req.desk_agent else desk_team(), req,
+        notify([req.desk_agent] if req.desk_agent and req.desk_agent.is_active else travel_managers(), req,
                f'{who} asked to cancel booked trip {code}.{reason}', actor)
     elif action == 'pick_up':
         notify([emp], req, f'{who} from the Travel Desk is now booking {code}.', actor)
+    elif action == 'assign':
+        agent, previous = req.desk_agent, getattr(req, '_previous_agent', None)
+        notify([agent], req, f'{who} assigned {code} ({req.traveller_name}: {req.route_summary}) to you for booking.', actor)
+        notify([emp], req, f'{display_name(agent)} from the Travel Desk is now booking {code}.', actor)
+        if previous:
+            notify([previous], req, f'{code} was reassigned to {display_name(agent)} by {who}.', actor)
     elif action == 'release':
-        notify(desk_team(), req, f'{code} was put back in the desk queue by {who}.', actor)
+        previous = getattr(req, '_previous_agent', None)
+        notify([previous], req, f'{who} took {code} off your queue.', actor)
     elif action == 'unavailable':
         notify([emp, req.approver], req,
                f'{code} could not be booked as requested. Please change and resubmit.{reason}', actor)
@@ -247,7 +276,9 @@ def perform_action(user, pk, action, comment='', data=None, files=None):
 
     with transaction.atomic():
         # Lock the row so two people clicking at the same moment can't both win.
-        req = TravelRequest.objects.select_for_update().select_related('employee', 'approver').get(pk=pk)
+        # of=('self',): lock only the request; Postgres can't lock the optional (LEFT JOIN) approver row.
+        req = TravelRequest.objects.select_for_update(of=('self',)).select_related(
+            'employee', 'approver', 'desk_agent').get(pk=pk)
 
         if not can_act(user, req, rule['who']):
             raise PermissionDenied('You are not allowed to do this on this request.')
@@ -270,7 +301,14 @@ def perform_action(user, pk, action, comment='', data=None, files=None):
 
         if action == 'pick_up':
             req.desk_agent = user
+        elif action == 'assign':
+            agent = _agent_for(req, data.get('agent'))
+            req._previous_agent = req.desk_agent
+            req.desk_agent = agent
+            comment = comment or (f'Reassigned to {display_name(agent)}' if req._previous_agent
+                                  else f'Assigned to {display_name(agent)}')
         elif action in ('release', 'unavailable'):
+            req._previous_agent = req.desk_agent
             req.desk_agent = None
         elif action == 'resubmit':
             req.approver = get_approver(req.employee)  # manager may have changed meanwhile
@@ -335,6 +373,19 @@ def _validate_booking(req, user, data, files):
     return reference, cost, ticket, ext
 
 
+def _agent_for(req, agent_id):
+    """The agent a Travel Manager picked: an active Travel Desk agent / Travel Manager, not the traveller."""
+    try:
+        agent = bookers().get(pk=int(agent_id))
+    except (TypeError, ValueError, User.DoesNotExist):
+        raise ValidationError({'agent': ['Choose a Travel Desk agent.']})
+    if agent.pk == req.employee_id:
+        raise ValidationError({'agent': ['Nobody can book their own trip. Choose someone else.']})
+    if agent.pk == req.desk_agent_id:
+        raise ValidationError({'agent': [f'{display_name(agent)} is already booking this trip.']})
+    return agent
+
+
 def _leg_of(req, leg_id):
     """The leg being booked; it must belong to this request."""
     try:
@@ -381,7 +432,7 @@ def auto_close_past_trips():
     today = timezone.localdate()
     with transaction.atomic():
         expired = list(
-            TravelRequest.objects.select_for_update().select_related('employee', 'approver').filter(
+            TravelRequest.objects.select_for_update(of=('self',)).select_related('employee', 'approver').filter(
                 status__in=[S.PENDING_APPROVAL, S.RETURNED, S.APPROVED, S.IN_PROGRESS], start_date__lt=today)
         )
         finished = list(

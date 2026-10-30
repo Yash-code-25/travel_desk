@@ -12,6 +12,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import Profile, SecurityEvent, TravelRequest
+from .test_profiles import mark_profiles_complete
 
 User = get_user_model()
 DEMO_PASSWORD = 'demo1234'
@@ -26,6 +27,7 @@ class EmployeeAdminTests(TestCase):
         with open(os.devnull, 'w') as devnull:
             call_command('seed_demo', force=True, stdout=devnull)
         cls.admin = User.objects.create_superuser('root', 'root@example.com', STRONG)
+        mark_profiles_complete()
 
     def setUp(self):
         cache.clear()
@@ -77,6 +79,10 @@ class EmployeeAdminTests(TestCase):
                                                         'confirm_password': STRONG}, format='json')
         self.assertEqual(changed.status_code, 200, changed.data)
         self.assertFalse(changed.data['user']['must_change_password'])
+        # Next: the travel profile must be filled in before the rest of the app opens
+        blocked = c.get('/api/requests/?scope=mine')
+        self.assertEqual((blocked.status_code, blocked.json()['code']), (403, 'profile_required'))
+        mark_profiles_complete()
         self.assertEqual(c.get('/api/requests/?scope=mine').status_code, 200)
 
     def test_temp_password_meets_policy_and_is_unique(self):
@@ -135,6 +141,7 @@ class EmployeeAdminTests(TestCase):
 
     def test_removing_admin_access_takes_effect(self):
         other = User.objects.create_superuser('admin2', 'a2@example.com', STRONG)
+        mark_profiles_complete()
         c, _ = self.sign_in('admin2', STRONG)
         self.assertEqual(c.get('/api/security/overview/').status_code, 200)
         self.api.patch(f'{URL}{other.pk}/', {'is_admin': False}, format='json')
@@ -197,11 +204,11 @@ class EmployeeAdminTests(TestCase):
 
     def test_desk_agent_leaving_desk_releases_bookings(self):
         req = self._trip('asha')
-        for user, action in [('meera', 'approve'), ('deepak', 'pick_up')]:
+        deepak = User.objects.get(username='deepak')
+        for user, body in [('meera', {'action': 'approve'}), ('anil', {'action': 'assign', 'agent': deepak.pk})]:
             c = APIClient()
             c.force_authenticate(User.objects.get(username=user))
-            c.post(f'/api/requests/{req.pk}/act/', {'action': action})
-        deepak = User.objects.get(username='deepak')
+            c.post(f'/api/requests/{req.pk}/act/', body)
         res = self.api.patch(f'{URL}{deepak.pk}/', {'role': 'EMPLOYEE'}, format='json')
         self.assertIn('1 booking(s) returned to the desk queue', res.data['work_notes'])
         req.refresh_from_db()

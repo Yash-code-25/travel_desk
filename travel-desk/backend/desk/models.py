@@ -1,3 +1,5 @@
+import os
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
@@ -15,6 +17,8 @@ class Profile(models.Model):
         EMPLOYEE = 'EMPLOYEE', 'Employee'
         MANAGER = 'MANAGER', 'Manager'
         DESK = 'DESK', 'Travel Desk'
+        # Gets every approved trip first; books it or assigns it to a Travel Desk agent.
+        TRAVEL_MANAGER = 'TRAVEL_MGR', 'Travel Manager'
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.EMPLOYEE)
@@ -29,6 +33,8 @@ class Profile(models.Model):
     phone = models.CharField(max_length=20, blank=True)
     # New accounts and admin password resets get a temporary password that must be changed first.
     must_change_password = models.BooleanField(default=False)
+    # Empty until the person fills in their travel profile; the app shows only that form until then.
+    profile_completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -65,6 +71,10 @@ class TravelRequest(models.Model):
         Status.IN_PROGRESS, Status.BOOKED, Status.CANCELLATION_REQUESTED,
     ]
 
+    class TripType(models.TextChoices):
+        DOMESTIC = 'DOMESTIC', 'Domestic'
+        INTERNATIONAL = 'INTERNATIONAL', 'International'
+
     MAX_LEGS = 10
 
     request_code = models.CharField(max_length=20, unique=True, blank=True)
@@ -77,7 +87,8 @@ class TravelRequest(models.Model):
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name='desk_assignments'
     )
 
-    # Who actually travels. Can be the requester, a colleague or a guest.
+    # Who actually travels. New requests are always for the requester themselves;
+    # older requests may be for a colleague or guest (kept as history).
     traveller_is_requester = models.BooleanField(default=True)
     traveller_name = models.CharField(max_length=150)
     traveller_phone = models.CharField(max_length=20, blank=True)
@@ -86,6 +97,11 @@ class TravelRequest(models.Model):
     # First and last day of the whole itinerary, kept in sync with the legs (see sync_dates).
     start_date = models.DateField()
     end_date = models.DateField(null=True, blank=True)
+    trip_type = models.CharField(max_length=15, choices=TripType.choices, default=TripType.DOMESTIC)
+    # Copied from the traveller's profile at submit: seat/meal/frequent flyer, and for international trips
+    # passport, matching visas ("visa_needed" lists countries without one) and forex. Later profile edits
+    # don't change what was approved. Hidden from managers.
+    traveller_snapshot = models.JSONField(default=dict, blank=True)
     purpose = models.TextField()
     preferences = models.TextField(blank=True)
     estimated_cost = models.DecimalField(  # for the whole trip
@@ -167,6 +183,9 @@ class TripLeg(models.Model):
     service = models.CharField(max_length=10, choices=TravelRequest.Service.choices)
     origin = models.CharField(max_length=100, blank=True)  # empty for hotels
     destination = models.CharField(max_length=100)  # city of the hotel for hotels
+    # International trips only (domestic legs leave these empty = India)
+    origin_country = models.CharField(max_length=60, blank=True)
+    destination_country = models.CharField(max_length=60, blank=True)
     date = models.DateField()  # departure, or hotel check-in
     end_date = models.DateField(null=True, blank=True)  # hotel check-out only
     notes = models.CharField(max_length=300, blank=True)  # e.g. "Rajdhani 3AC", "window seat"
@@ -256,3 +275,86 @@ class Notification(models.Model):
     class Meta:
         ordering = ['-created_at', '-id']
         indexes = [models.Index(fields=['user', 'is_read'])]
+
+
+def profile_document_path(instance, filename):
+    """profile_docs/<user id>/<random>.pdf - the original file name (often the person's name) is not kept."""
+    user_id = instance.profile.user_id if isinstance(instance, Visa) else instance.user_id
+    return f'profile_docs/{user_id}/{uuid.uuid4().hex}{os.path.splitext(filename)[1].lower()}'
+
+
+class TravelProfile(models.Model):
+    """Personal details and travel documents, filled in by the person themselves.
+    Visible only to its owner, the Travel Desk and administrators - never to managers."""
+
+    class Gender(models.TextChoices):
+        FEMALE = 'FEMALE', 'Female'
+        MALE = 'MALE', 'Male'
+        OTHER = 'OTHER', 'Other'
+
+    class Seat(models.TextChoices):
+        WINDOW = 'WINDOW', 'Window'
+        AISLE = 'AISLE', 'Aisle'
+        ANY = 'ANY', 'No preference'
+
+    class Meal(models.TextChoices):
+        VEG = 'VEG', 'Vegetarian'
+        NON_VEG = 'NON_VEG', 'Non-vegetarian'
+        JAIN = 'JAIN', 'Jain'
+        VEGAN = 'VEGAN', 'Vegan'
+        ANY = 'ANY', 'No preference'
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='travel_profile')
+
+    # Basic information (name, phone, designation and department live on User / Profile)
+    date_of_birth = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=10, choices=Gender.choices, blank=True)
+    address = models.CharField(max_length=500, blank=True)
+    emergency_contact_name = models.CharField(max_length=150, blank=True)
+    emergency_contact_phone = models.CharField(max_length=20, blank=True)
+
+    # Identity documents. Only the last 4 Aadhaar digits are stored (UIDAI rules); the copy is a masked Aadhaar.
+    aadhaar_last4 = models.CharField(max_length=4, blank=True)
+    aadhaar_file = models.FileField(upload_to=profile_document_path, blank=True)
+    pan_number = models.CharField(max_length=10, blank=True)
+    pan_file = models.FileField(upload_to=profile_document_path, blank=True)
+    has_passport = models.BooleanField(default=False)
+    passport_number = models.CharField(max_length=20, blank=True)
+    passport_place_of_issue = models.CharField(max_length=100, blank=True)
+    passport_issue_date = models.DateField(null=True, blank=True)
+    passport_expiry_date = models.DateField(null=True, blank=True)
+    passport_file = models.FileField(upload_to=profile_document_path, blank=True)
+
+    # Travel preferences
+    seat_preference = models.CharField(max_length=10, choices=Seat.choices, blank=True)
+    meal_preference = models.CharField(max_length=10, choices=Meal.choices, blank=True)
+    has_frequent_flyer = models.BooleanField(default=False)
+    # Only the issuing bank and last 4 digits: a full card number is never stored.
+    has_forex_card = models.BooleanField(default=False)
+    forex_bank = models.CharField(max_length=100, blank=True)
+    forex_card_last4 = models.CharField(max_length=4, blank=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Travel profile of {self.user}'
+
+
+class Visa(models.Model):
+    profile = models.ForeignKey(TravelProfile, on_delete=models.CASCADE, related_name='visas')
+    country = models.CharField(max_length=100)
+    visa_type = models.CharField(max_length=100)
+    expiry_date = models.DateField()
+    file = models.FileField(upload_to=profile_document_path)
+
+    class Meta:
+        ordering = ['expiry_date', 'id']
+
+
+class FrequentFlyer(models.Model):
+    profile = models.ForeignKey(TravelProfile, on_delete=models.CASCADE, related_name='frequent_flyers')
+    airline = models.CharField(max_length=100)
+    membership_number = models.CharField(max_length=30)
+
+    class Meta:
+        ordering = ['id']

@@ -52,6 +52,7 @@ def overview(request):
         employees=Count('id', filter=Q(profile__role=Profile.Role.EMPLOYEE) & active),
         managers=Count('id', filter=Q(profile__role=Profile.Role.MANAGER) & active),
         desk=Count('id', filter=Q(profile__role=Profile.Role.DESK) & active),
+        travel_managers=Count('id', filter=Q(profile__role=Profile.Role.TRAVEL_MANAGER) & active),
         awaiting_first_login=Count('id', filter=Q(profile__must_change_password=True) & active),
     )
     locked = [u.username for u in User.objects.only('username') if security.is_locked(u.username)]
@@ -126,6 +127,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     designation = serializers.CharField(source='profile.designation', max_length=100, required=False, allow_blank=True)
     phone = serializers.CharField(source='profile.phone', max_length=20, required=False, allow_blank=True)
     must_change_password = serializers.BooleanField(source='profile.must_change_password', read_only=True)
+    profile_complete = serializers.SerializerMethodField()
     team_size = serializers.IntegerField(read_only=True, default=0)
     locked = serializers.SerializerMethodField()
 
@@ -133,7 +135,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'full_name', 'email', 'phone', 'employee_id',
                   'department', 'designation', 'role', 'role_label', 'manager_id', 'manager_name', 'team_size',
-                  'is_active', 'is_admin', 'must_change_password', 'last_login', 'date_joined', 'locked']
+                  'is_active', 'is_admin', 'must_change_password', 'profile_complete', 'last_login', 'date_joined', 'locked']
         read_only_fields = ['last_login', 'date_joined']
 
     def get_full_name(self, obj):
@@ -142,6 +144,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def get_manager_name(self, obj):
         m = getattr(getattr(obj, 'profile', None), 'manager', None)
         return services.display_name(m) if m else ''
+
+    def get_profile_complete(self, obj):
+        return services.profile_of(obj).profile_completed_at is not None
 
     def get_locked(self, obj):
         return security.is_locked(obj.username)

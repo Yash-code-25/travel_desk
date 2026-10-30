@@ -17,7 +17,7 @@ export default function Topbar({ page, user, refreshKey, showNewRequest = true, 
           </Button>
         )}
         {/* On phones the sidebar (with your name) becomes a bottom tab bar, so the account button lives here */}
-        <button className="icon-btn lg mobile-only" onClick={onAccount} aria-label="Account and sign out">
+        <button className="icon-btn lg mobile-only" onClick={onAccount} aria-label="My profile and sign out">
           <Avatar name={user.full_name} size={30} />
         </button>
       </div>

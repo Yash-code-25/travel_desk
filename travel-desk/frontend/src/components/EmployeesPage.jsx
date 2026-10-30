@@ -1,7 +1,7 @@
 // Employees page (administrators): register, edit, reset passwords, unlock, deactivate.
 import { useEffect, useState } from 'react'
 import {
-  BriefcaseBusiness, CircleUser, Hourglass, KeyRound, LockOpen, LogOut, Pencil,
+  BriefcaseBusiness, CircleUser, Gauge, Hourglass, IdCard, KeyRound, LockOpen, LogOut, Pencil,
   ShieldCheck, Ticket, UserCheck, UserPlus, UserX, Users,
 } from 'lucide-react'
 import { allErrors, api } from '../api.js'
@@ -20,11 +20,12 @@ const FILTERS = [
   { key: 'EMPLOYEE', label: 'Employees', icon: CircleUser, tone: 'indigo', count: (u) => u.employees },
   { key: 'MANAGER', label: 'Managers', icon: BriefcaseBusiness, tone: 'amber', count: (u) => u.managers },
   { key: 'DESK', label: 'Travel Desk', icon: Ticket, tone: 'blue', count: (u) => u.desk },
+  { key: 'TRAVEL_MGR', label: 'Travel Managers', icon: Gauge, tone: 'teal', count: (u) => u.travel_managers },
   { key: 'admins', label: 'Administrators', icon: ShieldCheck, tone: 'pink', count: (u) => u.admins },
   { key: 'inactive', label: 'Inactive', icon: UserX, tone: 'gray', count: (u) => u.inactive },
 ]
 
-export default function EmployeesPage({ me, onPeopleChanged }) {
+export default function EmployeesPage({ me, onPeopleChanged, onViewProfile }) {
   const toast = useToast()
   const [counts, setCounts] = useState(null)
   const [people, setPeople] = useState([]) // everyone, for the "reports to" list
@@ -67,6 +68,7 @@ export default function EmployeesPage({ me, onPeopleChanged }) {
   function menuFor(u) {
     const isSelf = u.id === me.id
     return [
+      { icon: IdCard, label: 'View profile & documents', onClick: () => onViewProfile(u.id) },
       { icon: Pencil, label: 'Edit details & access', onClick: () => setEditing({ existing: u }) },
       { icon: KeyRound, label: 'Reset password', onClick: () => setConfirm({
         title: `Reset ${u.full_name}'s password?`,
@@ -186,6 +188,7 @@ function EmployeeRow({ person: u, isSelf, busy, menu, onOpen }) {
           {u.is_admin && <Badge tone="pink">Admin</Badge>}
           {u.is_active ? <Badge tone="green">Active</Badge> : <Badge tone="gray">Inactive</Badge>}
           {u.must_change_password && u.is_active && <Badge tone="blue">Awaiting first sign-in</Badge>}
+          {!u.must_change_password && !u.profile_complete && u.is_active && <Badge tone="amber">Profile pending</Badge>}
           {u.locked && <Badge tone="red" solid>Locked</Badge>}
         </div>
       </td>
