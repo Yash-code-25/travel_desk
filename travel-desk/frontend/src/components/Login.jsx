@@ -1,7 +1,7 @@
 // Sign-in page. Demo accounts come from the server and only exist in demo mode;
 // their password never reaches the browser (the server signs them in directly).
 import { useState } from 'react'
-import { CircleCheck, Eye, EyeOff, Plane, ShieldCheck, Zap } from 'lucide-react'
+import { Eye, EyeOff, Plane } from 'lucide-react'
 import { api } from '../api.js'
 import { Alert, Avatar, Button, Field } from './ui.jsx'
 
@@ -33,15 +33,25 @@ export default function Login({ config, onLogin }) {
           <span className="brand-name">Travel Desk</span>
         </div>
         <div>
-          <h1>Business travel, approved in minutes.</h1>
-          <p>Raise a request, get your manager's approval and receive your ticket, all in one place.</p>
-          <ul className="hero-points">
-            <li><Zap size={18} /> Clear approval steps with live status</li>
-            <li><ShieldCheck size={18} /> Account lockout, audit log and session protection</li>
-            <li><CircleCheck size={18} /> Tickets and history stored with every trip</li>
-          </ul>
+          <h1>Company travel requests, approvals and tickets.</h1>
+          <p>Request a trip, your manager approves it, and the Travel Desk books it.</p>
         </div>
-        <p className="hero-foot">© Travel Desk</p>
+        {/* A boarding pass, just for the look of the page */}
+        <div className="pass" aria-hidden="true">
+          <div className="pass-main">
+            <span className="pass-label">From · To</span>
+            <div className="pass-route">PNQ <Plane size={20} /> DEL</div>
+            <div className="pass-row">
+              <span><span className="pass-label">Traveller</span><strong>YOUR NAME</strong></span>
+              <span><span className="pass-label">Status</span><strong>APPROVED</strong></span>
+            </div>
+          </div>
+          <div className="pass-stub">
+            <span className="pass-label">Ref</span>
+            <strong>TR-0001</strong>
+          </div>
+        </div>
+        <p className="hero-foot">Travel Desk · internal use only</p>
       </section>
 
       <section className="login-panel">

@@ -125,13 +125,16 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+import dj_database_url
 
+# DATABASE_URL set -> Supabase Postgres. Not set -> local SQLite (dev and tests).
+DATABASES = {
+    'default': dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=60,
+        conn_health_checks=True,
+    )
+}
 # Shared cache for lockouts, rate limits and throttles. Stored in the database so it
 # survives restarts and is shared by every server process (an in-memory cache isn't).
 # For heavy traffic switch to Redis: django.core.cache.backends.redis.RedisCache.

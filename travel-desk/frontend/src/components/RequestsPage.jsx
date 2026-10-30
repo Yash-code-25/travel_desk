@@ -5,7 +5,7 @@ import { api } from '../api.js'
 import { PAGES, SERVICE_ICON } from '../constants.js'
 import { useDebounced, usePagedList } from '../hooks.js'
 import { dateRange, timeAgo, tripLength } from '../utils.js'
-import { Alert, Avatar, Badge, Button, EmptyState, Pager, SearchBox, StatCard, StatusBadge } from './ui.jsx'
+import { Alert, Avatar, Badge, Button, EmptyState, FilterTabs, Pager, SearchBox, StatusBadge } from './ui.jsx'
 
 const SORTS = [
   { value: 'newest', label: 'Newest first' },
@@ -43,12 +43,8 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
 
   return (
     <div className="page">
-      <section className="stat-grid">
-        {config.cards.map((c) => (
-          <StatCard key={c.key} icon={c.icon} label={c.label} tone={c.tone} value={countFor(c)}
-                    selected={cardKey === c.key} onClick={() => setCardKey(c.key)} />
-        ))}
-      </section>
+      <FilterTabs label="Show" value={cardKey} onChange={setCardKey}
+                  items={config.cards.map((c) => ({ key: c.key, label: c.label, count: countFor(c), alert: c.overdue }))} />
 
       <section className="panel">
         <div className="panel-toolbar">
@@ -65,7 +61,7 @@ export default function RequestsPage({ scope, refreshKey, onOpen, onNewRequest }
         <Alert>{list.error}</Alert>
 
         <div className={`table-wrap ${list.loading && list.result ? 'is-loading' : ''}`}>
-          <table className="table">
+          <table className="table cards">
             <thead>
               <tr>
                 <th>Request</th>
@@ -104,13 +100,13 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
   const bookingProgress = ['IN_PROGRESS', 'APPROVED'].includes(r.status) && r.legs_count > 1
   return (
     <tr tabIndex={0} onClick={() => onOpen(r.id)} onKeyDown={(e) => e.key === 'Enter' && onOpen(r.id)}>
-      <td>
+      <td className="c-first">
         <div className="cell-main">
           {r.needs_action && <i className="action-dot" title="Waiting on you" />}
           <strong>{r.request_code}</strong>
         </div>
       </td>
-      <td>
+      <td className="c-wide">
         <div className="person">
           <Avatar name={r.traveller_name} size={26} />
           <div>
@@ -122,7 +118,7 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
           </div>
         </div>
       </td>
-      <td>
+      <td className="c-wide">
         <div className="trip">
           <span className="trip-icons">
             {r.services.map((s) => { const Icon = SERVICE_ICON[s]; return <span key={s} className="trip-icon"><Icon size={14} /></span> })}
@@ -137,7 +133,7 @@ function RequestRow({ request: r, showTraveller, onOpen }) {
         </div>
       </td>
       <td>{dateRange(r)}</td>
-      <td>
+      <td className="c-top-right">
         <div className="status-cell">
           <StatusBadge status={r.status} />
           {r.is_overdue && <Badge tone="red" solid>Overdue</Badge>}

@@ -90,8 +90,8 @@ export default function App() {
           </Banner>
         )}
 
-        <Topbar page={adminPage || PAGES[current]} refreshKey={refreshKey} showNewRequest={!adminPage}
-                onNewRequest={newRequest} onOpenRequest={setOpenId} />
+        <Topbar page={adminPage || PAGES[current]} user={user} refreshKey={refreshKey} showNewRequest={!adminPage}
+                onNewRequest={newRequest} onOpenRequest={setOpenId} onAccount={() => setAccountOpen(true)} />
 
         {current === 'employees' && <EmployeesPage me={user} onPeopleChanged={refresh} />}
         {current === 'security' && <SecurityPage onGoToEmployees={() => setPage('employees')} />}
@@ -111,7 +111,7 @@ export default function App() {
                      onSaved={(saved) => { setFormFor(null); refresh(); setOpenId(saved.id) }} />
       )}
 
-      {accountOpen && <AccountDialog user={user} onClose={() => setAccountOpen(false)} onUpdated={setUser} />}
+      {accountOpen && <AccountDialog user={user} onClose={() => setAccountOpen(false)} onUpdated={setUser} onLogout={logout} />}
     </div>
   )
 }

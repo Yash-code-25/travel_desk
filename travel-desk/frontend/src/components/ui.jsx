@@ -112,6 +112,21 @@ export function StatCard({ icon: Icon, label, value, hint, tone = 'slate', selec
   )
 }
 
+/** Row of filter buttons with counts: [{ key, label, count, alert }]. Scrolls sideways on phones. */
+export function FilterTabs({ items, value, onChange, label = 'Filter' }) {
+  return (
+    <div className="filter-tabs" role="tablist" aria-label={label}>
+      {items.map((item) => (
+        <button key={item.key} role="tab" aria-selected={value === item.key} onClick={() => onChange(item.key)}
+                className={`filter-tab ${value === item.key ? 'active' : ''} ${item.alert && item.count > 0 ? 'alert' : ''}`}>
+          {item.label}
+          <span className="filter-count">{item.count ?? '–'}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // ------------------------------------------------------------ lists
 export function SearchBox({ value, onChange, placeholder }) {
   return (

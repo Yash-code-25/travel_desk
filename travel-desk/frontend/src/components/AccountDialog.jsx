@@ -1,15 +1,15 @@
 // "Account & security" for the signed-in person: change password, own access, recent activity.
 import { useEffect, useState } from 'react'
-import { BadgeCheck, KeyRound, Monitor } from 'lucide-react'
+import { BadgeCheck, KeyRound, LogOut, Monitor } from 'lucide-react'
 import { api } from '../api.js'
 import { EVENT_TONES } from '../constants.js'
 import { deviceName, formatDateTime, timeAgo } from '../utils.js'
 import Modal from './Modal.jsx'
 import PasswordForm from './PasswordForm.jsx'
 import { useToast } from './Toast.jsx'
-import { Avatar, Badge } from './ui.jsx'
+import { Avatar, Badge, Button } from './ui.jsx'
 
-export default function AccountDialog({ user, onClose, onUpdated }) {
+export default function AccountDialog({ user, onClose, onUpdated, onLogout }) {
   const toast = useToast()
   const [activity, setActivity] = useState(null)
   const loadActivity = () => api('/auth/activity/').then(setActivity).catch(() => setActivity([]))
@@ -30,7 +30,8 @@ export default function AccountDialog({ user, onClose, onUpdated }) {
   )
 
   return (
-    <Modal header={header} onClose={onClose} size="wide" dismissible bodyClassName="account-grid">
+    <Modal header={header} onClose={onClose} size="wide" dismissible bodyClassName="account-grid"
+           footer={<Button icon={LogOut} onClick={() => { onClose(); onLogout() }}>Sign out</Button>}>
       <section className="account-section">
         <p className="section-label"><KeyRound size={14} /> Change password</p>
         {user.password_weak && <div className="alert tone-orange">Your current password doesn't meet the policy. Please change it.</div>}

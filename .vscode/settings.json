@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "D:\\travel-desk\\travel-desk\\venv\\Scripts\\python.exe",
+  "python.analysis.extraPaths": ["D:\\travel-desk\\travel-desk\\backend"]
+}

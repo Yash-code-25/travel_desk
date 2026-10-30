@@ -12,7 +12,7 @@ import CredentialsDialog from './CredentialsDialog.jsx'
 import EmployeeForm from './EmployeeForm.jsx'
 import { ConfirmDialog } from './Modal.jsx'
 import { useToast } from './Toast.jsx'
-import { ActionMenu, Alert, Avatar, Badge, Banner, Button, EmptyState, Pager, SearchBox, StatCard } from './ui.jsx'
+import { ActionMenu, Alert, Avatar, Badge, Banner, Button, EmptyState, FilterTabs, Pager, SearchBox } from './ui.jsx'
 
 // Summary cards, which also filter the list.
 const FILTERS = [
@@ -105,12 +105,8 @@ export default function EmployeesPage({ me, onPeopleChanged }) {
 
   return (
     <div className="page">
-      <section className="stat-grid">
-        {FILTERS.map((f) => (
-          <StatCard key={f.key || 'all'} icon={f.icon} label={f.label} tone={f.tone} value={counts && f.count(counts)}
-                    selected={filter === f.key} onClick={() => setFilter(f.key)} />
-        ))}
-      </section>
+      <FilterTabs label="Show" value={filter} onChange={setFilter}
+                  items={FILTERS.map((f) => ({ key: f.key, label: f.label, count: counts ? f.count(counts) : undefined }))} />
 
       {counts?.awaiting_first_login > 0 && (
         <Banner tone="blue" icon={Hourglass}
@@ -127,7 +123,7 @@ export default function EmployeesPage({ me, onPeopleChanged }) {
         <Alert>{list.error}</Alert>
 
         <div className={`table-wrap ${list.loading && list.result ? 'is-loading' : ''}`}>
-          <table className="table compact">
+          <table className="table compact cards">
             <thead>
               <tr><th>Employee</th><th>Position</th><th>Portal role</th><th>Reports to</th><th>Status</th><th>Last sign-in</th><th /></tr>
             </thead>
@@ -167,7 +163,7 @@ function EmployeeRow({ person: u, isSelf, busy, menu, onOpen }) {
   const role = ROLE_BY_VALUE[u.role]
   return (
     <tr className={u.is_active ? '' : 'muted-row'} tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === 'Enter' && onOpen()}>
-      <td>
+      <td className="c-first">
         <div className="person">
           <Avatar name={u.full_name} size={32} />
           <div>
@@ -176,16 +172,16 @@ function EmployeeRow({ person: u, isSelf, busy, menu, onOpen }) {
           </div>
         </div>
       </td>
-      <td>
+      <td data-label="Position">
         <div>{u.designation || <span className="subtle">—</span>}</div>
         <div className="subtle xs">{u.department}</div>
       </td>
-      <td>
+      <td data-label="Portal role">
         <Badge tone={role?.tone}>{u.role_label}</Badge>
         {u.team_size > 0 && <div className="subtle xs">{u.team_size} reporting</div>}
       </td>
-      <td>{u.manager_name || <span className="subtle">—</span>}</td>
-      <td>
+      <td data-label="Reports to">{u.manager_name || <span className="subtle">—</span>}</td>
+      <td className="c-wide">
         <div className="status-cell wrap-badges">
           {u.is_admin && <Badge tone="pink">Admin</Badge>}
           {u.is_active ? <Badge tone="green">Active</Badge> : <Badge tone="gray">Inactive</Badge>}
@@ -193,8 +189,8 @@ function EmployeeRow({ person: u, isSelf, busy, menu, onOpen }) {
           {u.locked && <Badge tone="red" solid>Locked</Badge>}
         </div>
       </td>
-      <td className="subtle" title={u.last_login ? formatDateTime(u.last_login) : ''}>{u.last_login ? timeAgo(u.last_login) : 'Never'}</td>
-      <td className="right" onClick={(e) => e.stopPropagation()}><ActionMenu items={menu} disabled={busy} /></td>
+      <td className="subtle" data-label="Last sign-in" title={u.last_login ? formatDateTime(u.last_login) : ''}>{u.last_login ? timeAgo(u.last_login) : 'Never'}</td>
+      <td className="right c-top-right" onClick={(e) => e.stopPropagation()}><ActionMenu items={menu} disabled={busy} /></td>
     </tr>
   )
 }

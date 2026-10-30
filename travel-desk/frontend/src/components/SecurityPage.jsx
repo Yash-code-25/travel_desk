@@ -63,17 +63,17 @@ export default function SecurityPage({ onGoToEmployees }) {
         <Alert>{list.error}</Alert>
 
         <div className={`table-wrap ${list.loading && list.result ? 'is-loading' : ''}`}>
-          <table className="table compact">
+          <table className="table compact cards">
             <thead><tr><th>When</th><th>Event</th><th>Account</th><th>IP address</th><th>Device</th><th>Details</th></tr></thead>
             <tbody>
               {list.rows.map((e) => (
                 <tr key={e.id} className={`static-row ${e.is_alert ? 'alert-row' : ''}`}>
-                  <td title={formatDateTime(e.created_at)}>{timeAgo(e.created_at)}</td>
-                  <td><Badge tone={EVENT_TONES[e.type]}>{e.label}</Badge></td>
-                  <td><strong>{e.username || '—'}</strong>{e.actor_name && <div className="subtle xs">by {e.actor_name}</div>}</td>
-                  <td className="mono">{e.ip || '—'}</td>
-                  <td className="subtle">{e.user_agent ? deviceName(e.user_agent) : '—'}</td>
-                  <td className="wrap">{e.detail || <span className="subtle">—</span>}</td>
+                  <td className="c-first subtle" title={formatDateTime(e.created_at)}>{timeAgo(e.created_at)}</td>
+                  <td className="c-top-right"><Badge tone={EVENT_TONES[e.type]}>{e.label}</Badge></td>
+                  <td data-label="Account"><strong>{e.username || '—'}</strong>{e.actor_name && <div className="subtle xs">by {e.actor_name}</div>}</td>
+                  <td className="mono" data-label="IP address">{e.ip || '—'}</td>
+                  <td className="subtle c-wide" data-label="Device">{e.user_agent ? deviceName(e.user_agent) : '—'}</td>
+                  <td className="wrap c-wide">{e.detail || <span className="subtle">—</span>}</td>
                 </tr>
               ))}
             </tbody>

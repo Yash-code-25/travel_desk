@@ -1,3 +1,4 @@
 Django==6.1.2
 djangorestframework==3.18.3
 whitenoise==6.12.0
+pip install "psycopg[binary]" dj-database-url
